@@ -334,9 +334,3 @@ def get_session_status(session_id: str, x_api_key: str = Header(None)):
         "extractionProgress": honeypot._calculate_extraction_score(session)
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    print("🚀 Starting Agentic Honeypot API Server...")
-    print("📋 API Specification Compliant")
-    print("=" * 60)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
