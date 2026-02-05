@@ -1,16 +1,17 @@
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional, Dict
+from pydantic import BaseModel, validator
+from typing import List, Optional, Dict, Union, Any
 from datetime import datetime
 import requests
+import os
 
 from agent.agentic_honeypot import AgenticHoneypot
 from nlp_module import detect_scam_intent, detect_scam_type, extract_intelligence
 
 app = FastAPI()
-SECRET_KEY = "my_secret_key"
+SECRET_KEY = os.getenv("SECRET_KEY", "my_secret_key")
 
-# Initialize the honeypot (you'll need to provide your Gemini API key)
+# Initialize the honeypot
 honeypot = None
 
 def initialize_honeypot():
@@ -23,7 +24,19 @@ def initialize_honeypot():
 class Message(BaseModel):
     sender: str  # "scammer" or "user"
     text: str
-    timestamp: str  # ISO-8601 format
+    timestamp: Any  # Accepts both string OR number
+    
+    @validator('timestamp')
+    def validate_timestamp(cls, v):
+        if isinstance(v, int):
+            # Convert Unix timestamp (milliseconds) to ISO string
+            dt = datetime.fromtimestamp(v / 1000)
+            return dt.isoformat().replace("+00:00", "Z")
+        elif isinstance(v, str):
+            return v
+        else:
+            # If neither, use current time
+            return datetime.now().isoformat().replace("+00:00", "Z")
 
 class Metadata(BaseModel):
     channel: Optional[str] = "SMS"
@@ -194,7 +207,7 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
             agent_notes=generate_agent_notes(session)
         )
     
-    # 6️⃣ Return response
+    # 6️⃣ Return response - SIMPLIFIED FOR TESTER
     return HoneypotResponse(
         status="success",
         sessionId=session_id,
@@ -334,3 +347,4 @@ def get_session_status(session_id: str, x_api_key: str = Header(None)):
         "extractionProgress": honeypot._calculate_extraction_score(session)
     }
 
+# Note: Remove the __main__ block at the bottom for Vercel deployment
