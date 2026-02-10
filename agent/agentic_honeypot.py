@@ -209,21 +209,24 @@ class AgenticHoneypot:
             session["ending_sent"] = True
         
         # Natural ending excuses - ONLY if ending_conversation is True
-        if ending_conversation:
-            excuses = [
-                "My phone battery is dying, need to charge. Will message later.",
-                "Family calling me for dinner, talk tomorrow.",
-                "Network is very poor here, messages not sending.",
-                "Have to attend urgent work, will contact you in evening.",
-                "My child took the phone to play games, will get back.",
-                "Going out of city, network will be poor for few days."
-            ]
-            return random.choice(excuses)
+        
         
         # Use Gemini for natural responses
         try:
             # Different prompts based on stage
-            if stage == ConversationStage.INITIAL:
+             if ending_conversation:
+                prompt = f"""You are ending a conversation with a potential scammer naturally.
+                
+                Conversation so far:
+                {context}
+                
+                Their latest message: "{message}"
+                
+                Give a natural excuse to end the conversation (battery dying, family calling, network issues, etc.)
+                Be brief and casual like a real Indian person would text.
+                
+                Write a natural, casual response as a real person. Use 10-15 words. Keep it sounding like a chat message. Response:"""
+            elif stage == ConversationStage.INITIAL:
                 prompt = f"""You are talking to someone who sent you a suspicious message.
                 Act like a normal Indian person who is confused but cooperative.
                 
@@ -298,6 +301,17 @@ class AgenticHoneypot:
         except Exception as e:
             print(f"API Error: {e}")
             pass
+
+        if ending_conversation:
+            excuses = [
+                "My phone battery is dying, need to charge. Will message later.",
+                "Family calling me for dinner, talk tomorrow.",
+                "Network is very poor here, messages not sending.",
+                "Have to attend urgent work, will contact you in evening.",
+                "My child took the phone to play games, will get back.",
+                "Going out of city, network will be poor for few days."
+            ]
+            return random.choice(excuses)
         
         # Fallback responses - BETTER FLOW
         fallback_responses = {
