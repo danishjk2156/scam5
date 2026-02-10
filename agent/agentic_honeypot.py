@@ -53,7 +53,7 @@ class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
         self.gemini_api_key = gemini_api_key
         # Switch to 1.5-flash for better performance/cost
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
         # Conversation parameters
         self.min_messages_for_extraction = 2
