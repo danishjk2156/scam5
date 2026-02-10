@@ -10,6 +10,16 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 import os
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Now the rest of your imports
+import sys
+from contextlib import asynccontextmanager
+# ... rest of imports
 
 class ScamType(Enum):
     UPI_FRAUD = "UPI Fraud"
@@ -42,9 +52,9 @@ class ChatMessage(BaseModel):
 class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
         self.gemini_api_key = gemini_api_key
+        # Switch to 1.5-flash for better performance/cost
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
-        
         # Conversation parameters
         self.min_messages_for_extraction = 2
         self.max_messages_per_session = 15  # Increased for longer conversations
@@ -208,22 +218,22 @@ class AgenticHoneypot:
             ending_conversation = True
             session["ending_sent"] = True
         
-        # Natural ending excuses - ONLY if ending_conversation is True
-        if ending_conversation:
-            excuses = [
-                "My phone battery is dying, need to charge. Will message later.",
-                "Family calling me for dinner, talk tomorrow.",
-                "Network is very poor here, messages not sending.",
-                "Have to attend urgent work, will contact you in evening.",
-                "My child took the phone to play games, will get back.",
-                "Going out of city, network will be poor for few days."
-            ]
-            return random.choice(excuses)
-        
         # Use Gemini for natural responses
         try:
-            # Different prompts based on stage
-            if stage == ConversationStage.INITIAL:
+            # Different prompts based on stage OR ending
+            if ending_conversation:
+                prompt = f"""You are ending a conversation with a potential scammer naturally.
+                
+                Conversation so far:
+                {context}
+                
+                Their latest message: "{message}"
+                
+                Give a natural excuse to end the conversation (battery dying, family calling, network issues, etc.)
+                Be brief and casual like a real Indian person would text.
+                
+                Write a natural, casual response as a real person. Use 10-15 words. Keep it sounding like a chat message. Response:"""
+            elif stage == ConversationStage.INITIAL:
                 prompt = f"""You are talking to someone who sent you a suspicious message.
                 Act like a normal Indian person who is confused but cooperative.
                 
@@ -234,22 +244,10 @@ class AgenticHoneypot:
                 2. Ask for clarification
                 3. Don't be too eager or suspicious
                 4. Use simple Indian English
-                5. Keep response short (1-2 sentences)
+                5. Write a natural, casual response as a real person. Use 10-15 words. Keep it sounding like a chat message. Response:
                 
                 Your response:"""
-            
-            elif stage == ConversationStage.BUILDING_TRUST:
-                prompt = f"""You are talking to someone who might be a scammer.
-                Act like a trusting but slightly confused person.
-                
-                Conversation so far:
-                {context}
-                
-                Their latest message: "{message}"
-                
-                Your goal: Build trust to get more information
-                
-                Your response (1-2 sentences):"""
+        
             
             elif stage == ConversationStage.EXTRACTING:
                 prompt = f"""You are extracting information from a potential scammer.
@@ -272,7 +270,7 @@ class AgenticHoneypot:
                 
                 Their message: "{message}"
                 
-                Your response (1-2 sentences):"""
+                Write a natural, casual response as a real person. Use 10-15 words. Keep it sounding like a chat message. Response:"""
             
             headers = {"Content-Type": "application/json"}
             payload = {
@@ -282,6 +280,10 @@ class AgenticHoneypot:
                     
                 }
             }
+
+            # ... rest of your prompts for other stages
+            
+           
             
             response = requests.post(
                 f"{self.base_url}?key={self.gemini_api_key}",
@@ -297,9 +299,21 @@ class AgenticHoneypot:
         
         except Exception as e:
             print(f"API Error: {e}")
-            pass
+            # Fall through to fallback responses
         
-        # Fallback responses - BETTER FLOW
+        # Fallback responses - only used if API fails
+        if ending_conversation:
+            excuses = [
+                "My phone battery is dying, need to charge. Will message later.",
+                "Family calling me for dinner, talk tomorrow.",
+                "Network is very poor here, messages not sending.",
+                "Have to attend urgent work, will contact you in evening.",
+                "My child took the phone to play games, will get back.",
+                "Going out of city, network will be poor for few days."
+            ]
+            return random.choice(excuses)
+        
+        # Other fallback responses for different stages
         fallback_responses = {
             ConversationStage.INITIAL: [
                 "Hello, which order is this for? I don't remember any failed payment.",
@@ -327,8 +341,9 @@ class AgenticHoneypot:
             ]
         }
         
+        
         return random.choice(fallback_responses.get(stage, ["Okay, let me check."]))
-    
+        
     def _determine_next_stage(self, session: Dict) -> ConversationStage:
         """Determine next conversation stage - FIXED LOGIC"""
         current_stage = session.get("current_stage", ConversationStage.INITIAL)
