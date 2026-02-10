@@ -42,7 +42,7 @@ class ChatMessage(BaseModel):
 class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
         self.gemini_api_key = gemini_api_key
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
         
         # Conversation parameters
