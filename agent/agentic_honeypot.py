@@ -209,23 +209,23 @@ class AgenticHoneypot:
             session["ending_sent"] = True
         
         # Natural ending excuses - ONLY if ending_conversation is True
-        
+         if ending_conversation:
+                excuses = [
+                    "My phone battery is dying, need to charge. Will message later.",
+                    "Family calling me for dinner, talk tomorrow.",
+                    "Network is very poor here, messages not sending.",
+                    "Have to attend urgent work, will contact you in evening.",
+                    "My child took the phone to play games, will get back.",
+                    "Going out of city, network will be poor for few days."
+                ]
+        return random.choice(excuses)
         
         # Use Gemini for natural responses
         try:
             # Different prompts based on stage
-             if ending_conversation:
-                        excuses = [
-                            "My phone battery is dying, need to charge. Will message later.",
-                            "Family calling me for dinner, talk tomorrow.",
-                            "Network is very poor here, messages not sending.",
-                            "Have to attend urgent work, will contact you in evening.",
-                            "My child took the phone to play games, will get back.",
-                            "Going out of city, network will be poor for few days."
-                        ]
-            return random.choice(excuses)
+            
                  
-            elif stage == ConversationStage.INITIAL:
+            if stage == ConversationStage.INITIAL:
                 prompt = f"""You are talking to someone who sent you a suspicious message.
                 Act like a normal Indian person who is confused but cooperative.
                 
