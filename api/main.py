@@ -1,5 +1,20 @@
+import sys
+import os
+from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Now the rest of your imports
+import sys
+from contextlib import asynccontextmanager
+# ... rest of imports
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, Header, HTTPException
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 from typing import List, Optional, Dict, Union, Any
 from datetime import datetime
 import requests
@@ -8,7 +23,16 @@ import os
 from agent.agentic_honeypot import AgenticHoneypot
 from nlp_module import detect_scam_intent, detect_scam_type, extract_intelligence
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for FastAPI"""
+    # Startup
+    initialize_honeypot()
+    yield
+    # Shutdown
+    print("🔴 Shutting down honeypot")
+
+app = FastAPI(lifespan=lifespan)
 SECRET_KEY = os.getenv("SECRET_KEY", "my_secret_key")
 
 # Initialize the honeypot
@@ -17,7 +41,7 @@ honeypot = None
 def initialize_honeypot():
     global honeypot
     import os
-    gemini_key = os.getenv("GEMINI_API_KEY", "your-gemini-api-key-here")
+    gemini_key = os.getenv("GEMINI_API_KEY", "your_gemini_key")
     honeypot = AgenticHoneypot(gemini_api_key=gemini_key)
 
 # Pydantic models matching the API specification
@@ -25,8 +49,10 @@ class Message(BaseModel):
     sender: str  # "scammer" or "user"
     text: str
     timestamp: Any  # Accepts both string OR number
+   
     
-    @validator('timestamp')
+    @field_validator('timestamp')
+    @classmethod
     def validate_timestamp(cls, v):
         if isinstance(v, int):
             # Convert Unix timestamp (milliseconds) to ISO string
@@ -78,10 +104,7 @@ class HoneypotResponse(BaseModel):
 session_start_times = {}
 session_message_counts = {}
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize honeypot on startup"""
-    initialize_honeypot()
+
 
 @app.post("/honeypot/message", response_model=HoneypotResponse)
 def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
@@ -206,7 +229,16 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
             extracted_intelligence=extracted_intel,
             agent_notes=generate_agent_notes(session)
         )
+    print(f"🔍 Processing session: {session_id}")
+    print(f"📨 Message: {message_text}")
+    print(f"🤖 Scam detected: {scam_detected}, Type: {scam_type}")
     
+    # Add this before processing
+    print(f"🎯 Agent result: {agent_result}")
+    
+    # Check what the agent returned
+    if not agent_result["success"]:
+        print(f"❌ Agent error: {agent_result.get('error')}")
     # 6️⃣ Return response - SIMPLIFIED FOR TESTER
     return HoneypotResponse(
         status="success",
@@ -348,3 +380,6 @@ def get_session_status(session_id: str, x_api_key: str = Header(None)):
     }
 
 # Note: Remove the __main__ block at the bottom for Vercel deployment
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
