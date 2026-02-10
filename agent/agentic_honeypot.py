@@ -42,7 +42,7 @@ class ChatMessage(BaseModel):
 class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
         self.gemini_api_key = gemini_api_key
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
         
         # Conversation parameters
@@ -209,22 +209,20 @@ class AgenticHoneypot:
             session["ending_sent"] = True
         
         # Natural ending excuses - ONLY if ending_conversation is True
-         if ending_conversation:
-                excuses = [
-                    "My phone battery is dying, need to charge. Will message later.",
-                    "Family calling me for dinner, talk tomorrow.",
-                    "Network is very poor here, messages not sending.",
-                    "Have to attend urgent work, will contact you in evening.",
-                    "My child took the phone to play games, will get back.",
-                    "Going out of city, network will be poor for few days."
-                ]
-        return random.choice(excuses)
+        if ending_conversation:
+            excuses = [
+                "My phone battery is dying, need to charge. Will message later.",
+                "Family calling me for dinner, talk tomorrow.",
+                "Network is very poor here, messages not sending.",
+                "Have to attend urgent work, will contact you in evening.",
+                "My child took the phone to play games, will get back.",
+                "Going out of city, network will be poor for few days."
+            ]
+            return random.choice(excuses)
         
         # Use Gemini for natural responses
         try:
             # Different prompts based on stage
-            
-                 
             if stage == ConversationStage.INITIAL:
                 prompt = f"""You are talking to someone who sent you a suspicious message.
                 Act like a normal Indian person who is confused but cooperative.
@@ -300,8 +298,6 @@ class AgenticHoneypot:
         except Exception as e:
             print(f"API Error: {e}")
             pass
-
-        
         
         # Fallback responses - BETTER FLOW
         fallback_responses = {
