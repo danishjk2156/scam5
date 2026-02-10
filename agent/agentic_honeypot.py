@@ -42,7 +42,7 @@ class ChatMessage(BaseModel):
 class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
         self.gemini_api_key = gemini_api_key
-        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+        self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
         
         # Conversation parameters
@@ -279,7 +279,7 @@ class AgenticHoneypot:
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
                     "temperature": 0.8 if stage == ConversationStage.BUILDING_TRUST else 0.7,
-                    "maxOutputTokens": 100,
+                    
                 }
             }
             
