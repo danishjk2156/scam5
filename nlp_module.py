@@ -2,6 +2,7 @@
 """
 Improved NLP Module for Scam Detection
 Analyzes entire conversation history, not just single messages
+FULLY FIXED VERSION - Standardized field names
 """
 
 import re
@@ -33,12 +34,13 @@ def detect_scam_intent(text: str, conversation_history: List[Dict] = None) -> bo
     # Also check conversation history if provided
     if conversation_history:
         for msg in conversation_history:
-            if msg.get("from") == "scammer" or msg.get("sender") == "scammer":
-                msg_text = msg.get("message", msg.get("text", "")).lower()
+            # FIXED: Standardized to check "sender" field
+            if msg.get("sender") == "scammer":
+                msg_text = msg.get("message", "").lower()
                 score += sum(0.5 for k in keywords if k in msg_text)  # Half weight for history
     
-    # Lower threshold for detection
-    return score >= 2
+    # FIXED: Lower threshold for better detection
+    return score >= 1.5
 
 
 def detect_scam_type(text: str, conversation_history: List[Dict] = None) -> str:
@@ -57,8 +59,9 @@ def detect_scam_type(text: str, conversation_history: List[Dict] = None) -> str:
     
     if conversation_history:
         for msg in conversation_history:
-            if msg.get("from") == "scammer" or msg.get("sender") == "scammer":
-                msg_text = msg.get("message", msg.get("text", ""))
+            # FIXED: Standardized to check "sender" field
+            if msg.get("sender") == "scammer":
+                msg_text = msg.get("message", "")
                 all_text += " " + msg_text.lower()
     
     # Check for different scam types
@@ -115,8 +118,9 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
     
     if conversation_history:
         for msg in conversation_history:
-            if msg.get("from") == "scammer" or msg.get("sender") == "scammer":
-                msg_text = msg.get("message", msg.get("text", ""))
+            # FIXED: Standardized to check "sender" field
+            if msg.get("sender") == "scammer":
+                msg_text = msg.get("message", "")
                 all_text += " " + msg_text
     
     # Extract UPI IDs - improved patterns
@@ -225,8 +229,9 @@ def analyze_conversation_for_scam(conversation_history: List[Dict]) -> Dict:
     # Get all scammer messages
     scammer_messages = []
     for msg in conversation_history:
-        if msg.get("from") == "scammer" or msg.get("sender") == "scammer":
-            scammer_messages.append(msg.get("message", msg.get("text", "")))
+        # FIXED: Standardized to check "sender" field
+        if msg.get("sender") == "scammer":
+            scammer_messages.append(msg.get("message", ""))
     
     if not scammer_messages:
         return {

@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🍯 Agentic Honeypot - Real-Time Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+
+        header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 15px;
+            padding: 25px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .stat-card h3 {
+            font-size: 0.9em;
+            opacity: 0.8;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .stat-card .value {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .change {
+            font-size: 0.85em;
+            opacity: 0.7;
+        }
+
+        .main-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 15px;
+            padding: 25px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .panel h2 {
+            margin-bottom: 20px;
+            font-size: 1.5em;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .conversation-feed {
+            max-height: 400px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: rgba(255,255,255,0.3) transparent;
+        }
+
+        .conversation-feed::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .conversation-feed::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .conversation-feed::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.3);
+            border-radius: 4px;
+        }
+
+        .message {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            border-left: 4px solid;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .message.scammer {
+            border-left-color: #ff6b6b;
+        }
+
+        .message.agent {
+            border-left-color: #51cf66;
+        }
+
+        .message-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.85em;
+            opacity: 0.8;
+        }
+
+        .message-text {
+            font-size: 1em;
+            line-height: 1.5;
+        }
+
+        .alert-item {
+            background: rgba(255, 107, 107, 0.2);
+            border-left: 4px solid #ff6b6b;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .alert-item .time {
+            font-size: 0.8em;
+            opacity: 0.7;
+            margin-bottom: 5px;
+        }
+
+        .alert-item .text {
+            font-weight: bold;
+        }
+
+        .intelligence-list {
+            list-style: none;
+        }
+
+        .intelligence-item {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .intelligence-item .icon {
+            font-size: 1.5em;
+        }
+
+        .intelligence-item .label {
+            font-size: 0.85em;
+            opacity: 0.7;
+        }
+
+        .intelligence-item .value {
+            font-weight: bold;
+            margin-top: 3px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: bold;
+            margin-right: 5px;
+        }
+
+        .badge.active {
+            background: #51cf66;
+            color: #000;
+        }
+
+        .badge.ended {
+            background: #868e96;
+        }
+
+        .badge.critical {
+            background: #ff6b6b;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 50%, 100% { opacity: 1; }
+            25%, 75% { opacity: 0.5; }
+        }
+
+        .chart-container {
+            position: relative;
+            height: 250px;
+            margin-top: 20px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.3s ease;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .btn.primary {
+            background: rgba(81, 207, 102, 0.3);
+            border-color: #51cf66;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .input-group input {
+            flex: 1;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 1em;
+        }
+
+        .input-group input::placeholder {
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+
+        .status-indicator.online {
+            background: #51cf66;
+            box-shadow: 0 0 10px #51cf66;
+        }
+
+        .status-indicator.offline {
+            background: #868e96;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+
+        @media (max-width: 768px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🍯 Agentic Honeypot Dashboard</h1>
+            <p>Real-Time Scam Detection & Intelligence Extraction System</p>
+            <p style="font-size: 0.9em; margin-top: 10px;">
+                <span class="status-indicator online"></span>
+                System Status: <strong id="systemStatus">ACTIVE</strong>
+            </p>
+        </header>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Active Sessions</h3>
+                <div class="value" id="activeSessions">0</div>
+                <div class="change">Currently engaging scammers</div>
+            </div>
+            <div class="stat-card">
+                <h3>Scams Detected</h3>
+                <div class="value" id="scamsDetected">0</div>
+                <div class="change">Total since launch</div>
+            </div>
+            <div class="stat-card">
+                <h3>Intelligence Extracted</h3>
+                <div class="value" id="intelligenceCount">0</div>
+                <div class="change">UPI IDs, Phone Numbers, URLs</div>
+            </div>
+            <div class="stat-card">
+                <h3>Avg Extraction Rate</h3>
+                <div class="value" id="extractionRate">0%</div>
+                <div class="change">Success rate</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <input type="text" id="apiEndpoint" placeholder="API Endpoint (e.g., http://localhost:8000)" value="http://localhost:8000">
+            <input type="text" id="apiKey" placeholder="API Key" value="">
+            <button class="btn primary" onclick="testConnection()">🔗 Test Connection</button>
+            <button class="btn" onclick="refreshStats()">🔄 Refresh Stats</button>
+            <button class="btn primary" onclick="simulateSession()">🎬 Demo Session</button>
+            <button class="btn" onclick="clearDashboard()">🗑️ Clear</button>
+        </div>
+
+        <div class="main-grid">
+            <div class="panel">
+                <h2>
+                    💬 Live Conversations
+                    <span class="badge active" id="liveCount">0 Active</span>
+                </h2>
+                <div class="conversation-feed" id="conversationFeed">
+                    <p style="opacity: 0.5; text-align: center; padding: 40px;">
+                        No active conversations. Waiting for scammers...
+                    </p>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h2>🚨 Live Alerts</h2>
+                <div class="conversation-feed" id="alertsFeed">
+                    <p style="opacity: 0.5; text-align: center; padding: 40px;">
+                        No alerts yet
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>📊 Scam Type Distribution</h2>
+            <div class="chart-container">
+                <canvas id="scamTypeChart"></canvas>
+            </div>
+        </div>
+
+        <div class="panel">
+            <h2>🎯 Extracted Intelligence</h2>
+            <ul class="intelligence-list" id="intelligenceList">
+                <li class="intelligence-item">
+                    <span class="icon">📱</span>
+                    <div>
+                        <div class="label">UPI IDs Extracted</div>
+                        <div class="value" id="upiCount">0</div>
+                    </div>
+                </li>
+                <li class="intelligence-item">
+                    <span class="icon">☎️</span>
+                    <div>
+                        <div class="label">Phone Numbers</div>
+                        <div class="value" id="phoneCount">0</div>
+                    </div>
+                </li>
+                <li class="intelligence-item">
+                    <span class="icon">🔗</span>
+                    <div>
+                        <div class="label">Phishing Links</div>
+                        <div class="value" id="urlCount">0</div>
+                    </div>
+                </li>
+                <li class="intelligence-item">
+                    <span class="icon">🏦</span>
+                    <div>
+                        <div class="label">Bank Accounts</div>
+                        <div class="value" id="bankCount">0</div>
+                    </div>
+                </li>
+            </ul>
+        </div>
+
+        <div class="footer">
+            <p>🛡️ Agentic Honeypot System v2.0 | Built for GUVI Hackathon</p>
+            <p style="margin-top: 10px; font-size: 0.85em;">
+                Protecting users through intelligent scam detection and autonomous engagement
+            </p>
+        </div>
+    </div>
+
+    <script>
+        let scamTypeChart;
+        let activeSessions = new Set();
+        let totalScams = 0;
+        let intelligenceData = {
+            upi: new Set(),
+            phone: new Set(),
+            urls: new Set(),
+            banks: new Set()
+        };
+
+        // Initialize chart
+        function initChart() {
+            const ctx = document.getElementById('scamTypeChart').getContext('2d');
+            scamTypeChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['UPI Fraud', 'Phishing', 'Tech Support', 'Loan Scam', 'Other'],
+                    datasets: [{
+                        data: [0, 0, 0, 0, 0],
+                        backgroundColor: [
+                            '#ff6b6b',
+                            '#feca57',
+                            '#48dbfb',
+                            '#ff9ff3',
+                            '#54a0ff'
+                        ],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                color: '#fff',
+                                padding: 15,
+                                font: {
+                                    size: 12
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Test API connection
+        async function testConnection() {
+            const endpoint = document.getElementById('apiEndpoint').value;
+            const apiKey = document.getElementById('apiKey').value;
+            
+            try {
+                const response = await fetch(`${endpoint}/`, {
+                    headers: apiKey ? { 'x-api-key': apiKey } : {}
+                });
+                const data = await response.json();
+                
+                addAlert('✅ API Connection Successful!', 'success');
+                document.getElementById('systemStatus').textContent = 'ONLINE';
+                console.log('API Response:', data);
+                
+                // Auto-refresh stats after successful connection
+                setTimeout(() => refreshStats(), 500);
+            } catch (error) {
+                addAlert('❌ API Connection Failed: ' + error.message, 'error');
+                document.getElementById('systemStatus').textContent = 'OFFLINE';
+            }
+        }
+
+        // Refresh stats from API
+        async function refreshStats() {
+            const endpoint = document.getElementById('apiEndpoint').value;
+            const apiKey = document.getElementById('apiKey').value;
+            
+            if (!endpoint) {
+                console.log('No endpoint configured');
+                return;
+            }
+            
+            try {
+                // Get health/active sessions first
+                const healthResponse = await fetch(`${endpoint}/`, {
+                    headers: apiKey ? { 'x-api-key': apiKey } : {}
+                });
+                
+                if (healthResponse.ok) {
+                    const healthData = await healthResponse.json();
+                    document.getElementById('activeSessions').textContent = 
+                        healthData.active_sessions || 0;
+                }
+                
+                // Try to get stats from stats endpoint
+                try {
+                    const statsResponse = await fetch(`${endpoint}/stats`, {
+                        headers: apiKey ? { 'x-api-key': apiKey } : {}
+                    });
+                    
+                    if (statsResponse.ok) {
+                        const statsData = await statsResponse.json();
+                        updateStats(statsData.data || statsData);
+                    }
+                } catch (e) {
+                    console.log('Stats endpoint error:', e);
+                }
+                
+                // Get recent reports to extract intelligence counts
+                try {
+                    const reportsResponse = await fetch(`${endpoint}/reports/recent?limit=100`, {
+                        headers: apiKey ? { 'x-api-key': apiKey } : {}
+                    });
+                    
+                    if (reportsResponse.ok) {
+                        const reportsData = await reportsResponse.json();
+                        
+                        if (reportsData.reports && reportsData.reports.length > 0) {
+                            // Count total scams
+                            const totalScams = reportsData.reports.filter(r => r.scamDetected).length;
+                            document.getElementById('scamsDetected').textContent = totalScams;
+                            
+                            // Extract all intelligence
+                            let allUpiIds = new Set();
+                            let allPhones = new Set();
+                            let allUrls = new Set();
+                            let allBanks = new Set();
+                            
+                            reportsData.reports.forEach(report => {
+                                const intel = report.intelligence || {};
+                                
+                                // Add UPI IDs
+                                if (intel.upi_ids) {
+                                    intel.upi_ids.forEach(id => allUpiIds.add(id));
+                                }
+                                // Add phone numbers
+                                if (intel.phone_numbers) {
+                                    intel.phone_numbers.forEach(phone => allPhones.add(phone));
+                                }
+                                // Add URLs
+                                if (intel.phishing_links) {
+                                    intel.phishing_links.forEach(url => allUrls.add(url));
+                                }
+                                // Add bank accounts
+                                if (intel.bank_accounts) {
+                                    intel.bank_accounts.forEach(bank => allBanks.add(bank));
+                                }
+                            });
+                            
+                            // Update intelligence counts
+                            document.getElementById('upiCount').textContent = allUpiIds.size;
+                            document.getElementById('phoneCount').textContent = allPhones.size;
+                            document.getElementById('urlCount').textContent = allUrls.size;
+                            document.getElementById('bankCount').textContent = allBanks.size;
+                            
+                            const totalIntel = allUpiIds.size + allPhones.size + allUrls.size + allBanks.size;
+                            document.getElementById('intelligenceCount').textContent = totalIntel;
+                            
+                            // Calculate extraction rate
+                            if (totalScams > 0) {
+                                const rate = Math.round((totalIntel / totalScams) * 100);
+                                document.getElementById('extractionRate').textContent = rate + '%';
+                            }
+                            
+                            addAlert(`📊 Loaded ${totalScams} scams, ${totalIntel} intelligence artifacts`, 'info');
+                        }
+                    }
+                } catch (e) {
+                    console.log('Reports endpoint error:', e);
+                }
+                
+            } catch (error) {
+                console.error('Failed to fetch stats:', error);
+            }
+        }
+
+// Update dashboard stats
+function updateStats(data) {
+    if (data) {
+        // Update from API data
+        if (data.active_sessions !== undefined) {
+            document.getElementById('activeSessions').textContent = data.active_sessions;
+        }
+        if (data.total_scams !== undefined) {
+            document.getElementById('scamsDetected').textContent = data.total_scams;
+        }
+        if (data.total_intelligence !== undefined) {
+            document.getElementById('intelligenceCount').textContent = data.total_intelligence;
+        }
+        if (data.extraction_rate !== undefined) {
+            document.getElementById('extractionRate').textContent = data.extraction_rate + '%';
+        }
+    }
+}
+
+// Auto-refresh stats every 5 seconds
+setInterval(() => {
+    if (document.getElementById('systemStatus').textContent === 'ONLINE') {
+        refreshStats();
+    }
+}, 5000);
+
+        // Add message to conversation feed
+        function addMessage(sender, text, sessionId) {
+            const feed = document.getElementById('conversationFeed');
+            
+            // Remove placeholder
+            if (feed.querySelector('p')) {
+                feed.innerHTML = '';
+            }
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${sender}`;
+            messageDiv.innerHTML = `
+                <div class="message-header">
+                    <strong>${sender === 'scammer' ? '🎭 Scammer' : '🤖 Agent'}</strong>
+                    <span>${new Date().toLocaleTimeString()}</span>
+                </div>
+                <div class="message-text">${text}</div>
+                <div style="font-size: 0.75em; opacity: 0.6; margin-top: 5px;">Session: ${sessionId.substring(0, 8)}...</div>
+            `;
+            
+            feed.insertBefore(messageDiv, feed.firstChild);
+            
+            // Keep only last 20 messages
+            while (feed.children.length > 20) {
+                feed.removeChild(feed.lastChild);
+            }
+        }
+
+        // Add alert
+        function addAlert(text, type = 'info') {
+            const feed = document.getElementById('alertsFeed');
+            
+            // Remove placeholder
+            if (feed.querySelector('p')) {
+                feed.innerHTML = '';
+            }
+
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert-item';
+            alertDiv.innerHTML = `
+                <div class="time">${new Date().toLocaleTimeString()}</div>
+                <div class="text">${text}</div>
+            `;
+            
+            feed.insertBefore(alertDiv, feed.firstChild);
+            
+            // Keep only last 10 alerts
+            while (feed.children.length > 10) {
+                feed.removeChild(feed.lastChild);
+            }
+        }
+
+        // Add extracted intelligence
+        function addIntelligence(type, value) {
+            const set = intelligenceData[type];
+            if (!set.has(value)) {
+                set.add(value);
+                updateIntelligenceCounts();
+            }
+        }
+
+        // Update intelligence counts
+        function updateIntelligenceCounts() {
+            document.getElementById('upiCount').textContent = intelligenceData.upi.size;
+            document.getElementById('phoneCount').textContent = intelligenceData.phone.size;
+            document.getElementById('urlCount').textContent = intelligenceData.urls.size;
+            document.getElementById('bankCount').textContent = intelligenceData.banks.size;
+            
+            const total = intelligenceData.upi.size + intelligenceData.phone.size + 
+                         intelligenceData.urls.size + intelligenceData.banks.size;
+            document.getElementById('intelligenceCount').textContent = total;
+        }
+
+        // Simulate new session
+        function simulateSession() {
+            const sessionId = 'session_' + Math.random().toString(36).substring(7);
+            activeSessions.add(sessionId);
+            document.getElementById('activeSessions').textContent = activeSessions.size;
+            
+            addAlert(`🆕 New session started: ${sessionId}`, 'info');
+            
+            // Simulate conversation
+            setTimeout(() => {
+                addMessage('scammer', 'Your bank account will be blocked. Send ₹1 to verify@upi immediately!', sessionId);
+                addAlert('🚨 Scam detected! UPI fraud pattern identified', 'warning');
+            }, 1000);
+            
+            setTimeout(() => {
+                addMessage('agent', 'Oh no! Which bank? I am worried. Can you help me?', sessionId);
+            }, 2500);
+            
+            setTimeout(() => {
+                addMessage('scammer', 'ICICI Bank. Send to verify@paytm now!', sessionId);
+                addIntelligence('upi', 'verify@paytm');
+                addAlert('✅ UPI ID extracted: verify@paytm', 'success');
+            }, 4000);
+            
+            setTimeout(() => {
+                addMessage('agent', 'Okay, let me check my account first. What is your phone number for support?', sessionId);
+            }, 5500);
+            
+            setTimeout(() => {
+                addMessage('scammer', 'Call +91-9876543210 immediately!', sessionId);
+                addIntelligence('phone', '+91-9876543210');
+                addAlert('✅ Phone number extracted: +91-9876543210', 'success');
+                
+                totalScams++;
+                document.getElementById('scamsDetected').textContent = totalScams;
+                
+                // Update chart
+                const currentData = scamTypeChart.data.datasets[0].data;
+                currentData[0]++; // UPI Fraud
+                scamTypeChart.update();
+                
+                activeSessions.delete(sessionId);
+                document.getElementById('activeSessions').textContent = activeSessions.size;
+            }, 7000);
+        }
+
+        // Clear dashboard
+        function clearDashboard() {
+            document.getElementById('conversationFeed').innerHTML = '<p style="opacity: 0.5; text-align: center; padding: 40px;">No active conversations. Waiting for scammers...</p>';
+            document.getElementById('alertsFeed').innerHTML = '<p style="opacity: 0.5; text-align: center; padding: 40px;">No alerts yet</p>';
+            
+            activeSessions.clear();
+            intelligenceData = { upi: new Set(), phone: new Set(), urls: new Set(), banks: new Set() };
+            
+            updateIntelligenceCounts();
+            document.getElementById('activeSessions').textContent = '0';
+        }
+
+        // Initialize on load
+        window.onload = function() {
+            initChart();
+            addAlert('🚀 Dashboard initialized and ready', 'info');
+            
+            // Demo mode - simulate sessions every 30 seconds
+            // Uncomment for auto-demo
+            // setInterval(simulateSession, 30000);
+        };
+    </script>
+</body>
+</html>

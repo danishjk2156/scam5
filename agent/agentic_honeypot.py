@@ -49,22 +49,22 @@ class AgenticHoneypot:
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
         # Conversation parameters
-        self.min_messages_for_extraction = 2
-        self.max_messages_per_session = 15
+        self.min_messages_for_extraction = 5
+        self.max_messages_per_session = 25
         self.extraction_threshold = 0.5
     
     def _get_conversation_context(self, session: Dict) -> str:
         """Format conversation history for context"""
         context = []
         for msg in session.get("conversation_history", []):
-            role = "Scammer" if msg["from"] == "scammer" else "You"
+            role = "Scammer" if msg.get("sender") == "scammer" else "You"
             context.append(f"{role}: {msg['message']}")
         return "\n".join(context[-8:])  # Increased context window
     
     def _should_end_conversation(self, session: Dict) -> bool:
         """Determine if conversation should end"""
         history = session.get("conversation_history", [])
-        scammer_messages = [msg for msg in history if msg["from"] == "scammer"]
+        scammer_messages = [msg for msg in history if msg.get("sender") == "scammer"]
         
         if len(scammer_messages) < 4:
             return False
@@ -93,7 +93,7 @@ class AgenticHoneypot:
         """Use Gemini to analyze the scammer's message and determine the appropriate stage"""
         
         context = self._get_conversation_context(session)
-        scammer_messages_count = len([msg for msg in session.get("conversation_history", []) if msg["from"] == "scammer"])
+        scammer_messages_count = len([msg for msg in session.get("conversation_history", []) if msg.get("sender") == "scammer"])
         
         prompt = f"""You are analyzing a conversation with a potential scammer. Based on the scammer's message, determine:
 
@@ -165,7 +165,7 @@ Return your analysis in JSON format:
     def _fallback_analysis(self, message: str, session: Dict) -> Dict:
         """Fallback analysis when Gemini fails"""
         message_lower = message.lower()
-        scammer_messages_count = len([msg for msg in session.get("conversation_history", []) if msg["from"] == "scammer"])
+        scammer_messages_count = len([msg for msg in session.get("conversation_history", []) if msg.get("sender") == "scammer"])
         
         # Determine stage based on message content and conversation length
         if scammer_messages_count < 2:
@@ -295,7 +295,9 @@ Return your analysis in JSON format:
                 2. Don't sound too knowledgeable
                 3. Use simple Indian English
                 4. Response should be 10-15 words
-                
+                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
+Act confused and make small typos occasionally. 
+If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                 Your response:"""
             
             elif stage == ConversationStage.BUILDING_TRUST:
@@ -312,7 +314,9 @@ Return your analysis in JSON format:
                 2. Ask for more details about the offer/issue
                 3. Sound interested but slightly hesitant
                 4. Response should be 10-15 words
-                
+                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
+Act confused and make small typos occasionally. 
+If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                 Your response:"""
             
             elif stage == ConversationStage.EXTRACTING:
@@ -325,7 +329,9 @@ Return your analysis in JSON format:
                 Act like you're trying to help but need more information.
                 
                 Write a natural response asking for specific details. 10-15 words.
-                
+                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
+Act confused and make small typos occasionally. 
+If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                 Your response:"""
             
             elif stage == ConversationStage.DEEP_EXTRACTION:
@@ -339,7 +345,9 @@ Return your analysis in JSON format:
                 Sound slightly stressed/confused but cooperative.
                 
                 Write a natural response asking for specific information. 10-15 words.
-                
+                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
+Act confused and make small typos occasionally. 
+If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                 Your response:"""
             
             else:
@@ -349,7 +357,9 @@ Return your analysis in JSON format:
                 {context}
                 
                 Their message: "{message}"
-                
+                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
+Act confused and make small typos occasionally. 
+If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                 Write a natural, casual response as a real person. Use 10-15 words. Response:"""
             
             headers = {"Content-Type": "application/json"}
@@ -539,14 +549,16 @@ Return your analysis in JSON format:
             # Add scammer message to history
             session["conversation_history"].append({
                 "timestamp": datetime.now().isoformat(),
-                "from": "scammer",
+                "sender": "scammer",
                 "message": message
             })
             
             # Analyze the message with Gemini
             analysis = self._analyze_message_with_gemini(message, session)
             
-            # Store analysis in session
+            # Store analysis in session (ensure scam_analysis exists)
+            if "scam_analysis" not in session:
+                session["scam_analysis"] = []
             session["scam_analysis"].append({
                 "timestamp": datetime.now().isoformat(),
                 "analysis": analysis
@@ -565,7 +577,7 @@ Return your analysis in JSON format:
             # Add agent response to history
             session["conversation_history"].append({
                 "timestamp": datetime.now().isoformat(),
-                "from": "agent",
+                "sender": "agent",
                 "message": agent_response
             })
             
@@ -581,7 +593,7 @@ Return your analysis in JSON format:
             response_data = {
                 "reply": agent_response,
                 "session_id": session_id,
-                "message_number": len([msg for msg in session["conversation_history"] if msg["from"] == "scammer"]),
+                "message_number": len([msg for msg in session["conversation_history"] if msg.get("sender") == "scammer"]),
                 "conversation_stage": session["current_stage"].value,
                 "extraction_progress": extraction_score,
                 "conversation_active": not session["ended"],
@@ -619,7 +631,7 @@ Return your analysis in JSON format:
                 "error": "Conversation still active",
                 "data": {
                     "conversation_active": True,
-                    "message_count": len([msg for msg in session["conversation_history"] if msg["from"] == "scammer"]),
+                    "message_count": len([msg for msg in session["conversation_history"] if msg.get("sender") == "scammer"]),
                     "extraction_progress": self._calculate_extraction_score(session)
                 }
             }
@@ -627,7 +639,7 @@ Return your analysis in JSON format:
         # Get all scammer messages
         scammer_messages = [
             msg["message"] for msg in session["conversation_history"]
-            if msg["from"] == "scammer"
+            if msg.get("sender") == "scammer"
         ]
         
         # Get artifacts
@@ -872,7 +884,7 @@ async def get_session_status(session_id: str):
         "success": True,
         "data": {
             "session_id": session_id,
-            "message_count": len([msg for msg in session.get("conversation_history", []) if msg["from"] == "scammer"]),
+            "message_count": len([msg for msg in session.get("conversation_history", []) if msg.get("sender") == "scammer"]),
             "conversation_active": not session.get("ended", False),
             "current_stage": session.get("current_stage", ConversationStage.INITIAL).value,
             "extraction_progress": honeypot._calculate_extraction_score(session),
