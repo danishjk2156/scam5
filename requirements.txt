@@ -11,9 +11,10 @@ storage3==0.7.7
 
 # networking
 httpx==0.24.1
-websockets>=11,<13  # Changed from ==10.4 to match realtime requirements
+websockets>=11,<13
 h11==0.14.0
 httpcore==0.17.3
+requests==2.31.0  # Add this line
 
 # optional but commonly needed
 pydantic==2.6.1
