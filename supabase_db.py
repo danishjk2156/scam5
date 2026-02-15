@@ -369,5 +369,5 @@ class SupabaseService:
             return []
 
 
-# Initialize on import
-init_supabase()
+# Lazy initialization - will be called on first use via get_supabase()
+# init_supabase()  # Commented out to prevent crashes during import
