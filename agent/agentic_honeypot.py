@@ -5,15 +5,6 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from enum import Enum
 import random
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import uvicorn
-import os
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 class ScamType(Enum):
     UPI_FRAUD = "UPI Fraud"
@@ -36,21 +27,14 @@ class ConversationStage(Enum):
     EXIT_PREPARATION = "exit_preparation"
     ENDED = "ended"
 
-class ChatMessage(BaseModel):
-    session_id: str
-    message: str
-    confidence: Optional[float] = 0.8
-    sender_id: Optional[str] = "unknown"
-    channel: Optional[str] = "sms"
-
 class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
         self.gemini_api_key = gemini_api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
         # Conversation parameters
-        self.min_messages_for_extraction = 5
-        self.max_messages_per_session = 25
+        self.min_messages_for_extraction = 3
+        self.max_messages_per_session = 20
         self.extraction_threshold = 0.5
     
     def _get_conversation_context(self, session: Dict) -> str:
@@ -59,74 +43,113 @@ class AgenticHoneypot:
         for msg in session.get("conversation_history", []):
             role = "Scammer" if msg.get("sender") == "scammer" else "You"
             context.append(f"{role}: {msg['message']}")
-        return "\n".join(context[-8:])  # Increased context window
+        return "\n".join(context[-10:])  # Last 10 messages for better context
     
     def _should_end_conversation(self, session: Dict) -> bool:
-        """Determine if conversation should end"""
+        """Determine if conversation should end based on logical criteria"""
         history = session.get("conversation_history", [])
         scammer_messages = [msg for msg in history if msg.get("sender") == "scammer"]
         
-        if len(scammer_messages) < 4:
+        # Don't end too early
+        if len(scammer_messages) < 5:
             return False
         
+        # End if max messages reached
         if len(history) >= self.max_messages_per_session:
             return True
         
-        # Check for sensitive info requests
-        sensitive_count = 0
-        for msg in scammer_messages:
-            message_text = msg["message"].lower()
-            sensitive_keywords = ["pin", "password", "otp", "aadhaar", "pan", "cvv"]
-            if any(keyword in message_text for keyword in sensitive_keywords):
-                sensitive_count += 1
+        # Check for repeated sensitive info requests (scammer is getting aggressive)
+        recent_messages = [msg["message"].lower() for msg in scammer_messages[-3:]]
+        sensitive_keywords = ["pin", "password", "otp", "aadhaar", "pan", "cvv"]
+        sensitive_count = sum(1 for msg in recent_messages if any(kw in msg for kw in sensitive_keywords))
         
         if sensitive_count >= 2:
             return True
         
+        # End if we've extracted significant intelligence
         extraction_score = self._calculate_extraction_score(session)
-        if extraction_score > 0.7 and len(history) >= 10:
+        if extraction_score > 0.6 and len(scammer_messages) >= 8:
             return True
         
         return False
     
     def _analyze_message_with_gemini(self, message: str, session: Dict) -> Dict:
-        """Use Gemini to analyze the scammer's message and determine the appropriate stage"""
+        """Use Gemini to deeply analyze the scammer's message and conversation context"""
         
         context = self._get_conversation_context(session)
         scammer_messages_count = len([msg for msg in session.get("conversation_history", []) if msg.get("sender") == "scammer"])
         
-        prompt = f"""You are analyzing a conversation with a potential scammer. Based on the scammer's message, determine:
+        # Get extracted intelligence so far
+        artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        extracted_info = {
+            "upi_ids": artifacts.get("upi_ids", []),
+            "phone_numbers": artifacts.get("phone_numbers", []),
+            "urls": artifacts.get("urls", []),
+            "amounts": artifacts.get("amounts", [])
+        }
+        
+        prompt = f"""You are analyzing a scam conversation to help an AI agent respond naturally and extract intelligence.
 
-1. CONVERSATION_STAGE: What stage of the conversation should the agent be in?
-   - initial: Just starting, scammer sent first message, agent should be confused/unsure
-   - building_trust: Scammer is trying to build trust, agent should be cooperative but cautious
-   - extracting: Scammer is asking for basic info, agent should ask for details
-   - deep_extraction: Scammer is pushing hard, agent should play along but extract maximum intel
-   - exit_preparation: Time to end conversation naturally
-
-2. SCAM_TYPE: What type of scam is this?
-3. URGENCY_LEVEL: low, medium, high
-4. SCAMMER_TACTIC: What tactic is the scammer using? (urgency, threat, reward, impersonation, etc.)
-5. INFORMATION_REQUESTED: What specific information is the scammer asking for?
-6. CONFIDENCE_SCORE: 0-1
-
-Conversation history:
+CONVERSATION CONTEXT:
 {context}
 
-Current stage: {session.get('current_stage', ConversationStage.INITIAL).value}
-Messages from scammer so far: {scammer_messages_count}
+SCAMMER'S LATEST MESSAGE: "{message}"
 
-Scammer's latest message: "{message}"
+INTELLIGENCE EXTRACTED SO FAR:
+- UPI IDs: {extracted_info['upi_ids']}
+- Phone Numbers: {extracted_info['phone_numbers']}
+- URLs: {extracted_info['urls']}
+- Amounts: {extracted_info['amounts']}
 
-Return your analysis in JSON format:
+CURRENT STAGE: {session.get('current_stage', ConversationStage.INITIAL).value}
+SCAMMER MESSAGES SO FAR: {scammer_messages_count}
+
+ANALYZE AND PROVIDE:
+
+1. **CONVERSATION_STAGE**: Based on the conversation flow, what stage should we be in?
+   - initial: First 1-2 messages, victim is confused/curious
+   - building_trust: Scammer establishing legitimacy (messages 2-4)
+   - extracting: Victim asking questions to extract info (messages 4-7)
+   - deep_extraction: Scammer pushing hard, victim extracting critical data (messages 7+)
+   - exit_preparation: Time to end naturally (after sufficient extraction)
+
+2. **SCAM_TYPE**: Identify the specific scam type
+
+3. **KEY_ELEMENTS**: What are the key elements in scammer's message?
+   - Is there a UPI ID?
+   - Is there urgency/threat?
+   - Is there a request for sensitive information?
+   - Is there a payment instruction?
+   - Is there contact information?
+
+4. **VICTIM_RESPONSE_STRATEGY**: How should the victim respond to extract MORE intelligence?
+   - What specific question should be asked?
+   - What confusion or concern should be expressed?
+   - What additional details should be requested?
+
+5. **INTELLIGENCE_GAPS**: What intelligence is still missing?
+   - Need UPI ID?
+   - Need phone number?
+   - Need website URL?
+   - Need transaction details?
+
+Return ONLY valid JSON in this exact format:
 {{
-    "stage": "one of the stage values",
-    "scam_type": "scam type description",
-    "urgency_level": "low/medium/high",
-    "scammer_tactic": "description of tactic",
-    "information_requested": ["list", "of", "requested", "info"],
-    "confidence_score": 0.0,
-    "reasoning": "brief explanation"
+    "stage": "initial|building_trust|extracting|deep_extraction|exit_preparation",
+    "scam_type": "specific scam type",
+    "urgency_level": "low|medium|high",
+    "scammer_tactic": "description",
+    "key_elements": {{
+        "has_upi_id": true/false,
+        "has_urgency": true/false,
+        "requests_sensitive_info": true/false,
+        "requests_payment": true/false,
+        "has_contact_info": true/false
+    }},
+    "victim_response_strategy": "specific strategy for this message",
+    "specific_question_to_ask": "exact question victim should ask",
+    "intelligence_gaps": ["list of missing intelligence"],
+    "confidence_score": 0.0-1.0
 }}
 """
         
@@ -135,9 +158,10 @@ Return your analysis in JSON format:
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "temperature": 0.3,
+                    "temperature": 0.4,
                     "top_p": 0.95,
-                    "top_k": 40
+                    "top_k": 40,
+                    "response_mime_type": "application/json"
                 }
             }
             
@@ -145,7 +169,7 @@ Return your analysis in JSON format:
                 f"{self.base_url}?key={self.gemini_api_key}",
                 headers=headers,
                 json=payload,
-                timeout=10
+                timeout=15
             )
             
             if response.status_code == 200:
@@ -155,62 +179,84 @@ Return your analysis in JSON format:
                     # Extract JSON from response
                     json_match = re.search(r'\{.*\}', text, re.DOTALL)
                     if json_match:
-                        return json.loads(json_match.group())
+                        analysis = json.loads(json_match.group())
+                        print(f"✅ Gemini Analysis: {analysis.get('stage', 'unknown')} - {analysis.get('victim_response_strategy', 'unknown')}")
+                        return analysis
+            
+            print(f"⚠️ Gemini API returned status {response.status_code}")
         except Exception as e:
-            print(f"Gemini analysis error: {e}")
+            print(f"❌ Gemini analysis error: {e}")
         
-        # Fallback analysis
-        return self._fallback_analysis(message, session)
+        # Enhanced fallback analysis
+        return self._enhanced_fallback_analysis(message, session)
     
-    def _fallback_analysis(self, message: str, session: Dict) -> Dict:
-        """Fallback analysis when Gemini fails"""
+    def _enhanced_fallback_analysis(self, message: str, session: Dict) -> Dict:
+        """Enhanced fallback analysis with logical reasoning"""
         message_lower = message.lower()
         scammer_messages_count = len([msg for msg in session.get("conversation_history", []) if msg.get("sender") == "scammer"])
         
-        # Determine stage based on message content and conversation length
-        if scammer_messages_count < 2:
-            stage = ConversationStage.INITIAL
-        elif any(word in message_lower for word in ["urgent", "immediately", "now", "quick", "hurry"]):
-            if "pin" in message_lower or "password" in message_lower or "otp" in message_lower:
-                stage = ConversationStage.DEEP_EXTRACTION
+        # Determine stage logically
+        if scammer_messages_count == 1:
+            stage = "initial"
+            strategy = "Express confusion and ask what this is about"
+            question = "Sorry, which order/account are you referring to?"
+        elif scammer_messages_count <= 3:
+            stage = "building_trust"
+            strategy = "Show interest but ask for verification details"
+            question = "Can you tell me your reference number or transaction ID?"
+        elif scammer_messages_count <= 6:
+            stage = "extracting"
+            if any(word in message_lower for word in ["send", "transfer", "payment"]):
+                strategy = "Ask for exact payment details to extract UPI ID"
+                question = "What is the exact UPI ID I should send to?"
             else:
-                stage = ConversationStage.EXTRACTING
-        elif any(word in message_lower for word in ["refund", "cashback", "reward", "offer"]):
-            stage = ConversationStage.BUILDING_TRUST
-        elif any(word in message_lower for word in ["send", "transfer", "pay", "upi"]):
-            if scammer_messages_count > 5:
-                stage = ConversationStage.DEEP_EXTRACTION
-            else:
-                stage = ConversationStage.EXTRACTING
+                strategy = "Request specific contact information"
+                question = "What's your helpline number so I can call back?"
         else:
-            stage = ConversationStage.BUILDING_TRUST
+            stage = "deep_extraction"
+            strategy = "Act stressed but willing to comply, extract final details"
+            question = "Please confirm the exact details one more time, I'm worried about making a mistake"
         
-        # Determine scam type
-        scam_type = ScamType.UNKNOWN
-        if any(word in message_lower for word in ["upi", "@ok", "send ₹", "transfer ₹"]):
-            scam_type = ScamType.UPI_FRAUD
-        elif any(word in message_lower for word in ["http://", "https://", "click link"]):
-            scam_type = ScamType.PHISHING
+        # Detect key elements
+        has_upi = bool(re.search(r'@(okicici|oksbi|okhdfc|paytm|phonepe|gpay|ybl)', message_lower))
+        has_urgency = any(word in message_lower for word in ["urgent", "immediately", "hurry", "quick", "now", "last chance"])
+        requests_sensitive = any(word in message_lower for word in ["pin", "password", "otp", "cvv", "pan"])
+        requests_payment = any(word in message_lower for word in ["send", "transfer", "pay", "₹"])
+        has_contact = bool(re.search(r'\d{10}', message))
+        
+        # Determine intelligence gaps
+        artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        gaps = []
+        if not artifacts.get("upi_ids"):
+            gaps.append("UPI ID needed")
+        if not artifacts.get("phone_numbers"):
+            gaps.append("Phone number needed")
+        if not artifacts.get("urls"):
+            gaps.append("Website URL needed")
         
         return {
-            "stage": stage.value,
-            "scam_type": scam_type.value,
-            "urgency_level": "high" if any(word in message_lower for word in ["urgent", "immediately", "now"]) else "medium",
-            "scammer_tactic": "urgency" if "urgent" in message_lower else "reward",
-            "information_requested": [],
-            "confidence_score": 0.7,
-            "reasoning": "Fallback analysis based on keywords"
+            "stage": stage,
+            "scam_type": "UPI Fraud" if has_upi else "Phishing",
+            "urgency_level": "high" if has_urgency else "medium",
+            "scammer_tactic": "urgency with payment request" if has_urgency and requests_payment else "trust building",
+            "key_elements": {
+                "has_upi_id": has_upi,
+                "has_urgency": has_urgency,
+                "requests_sensitive_info": requests_sensitive,
+                "requests_payment": requests_payment,
+                "has_contact_info": has_contact
+            },
+            "victim_response_strategy": strategy,
+            "specific_question_to_ask": question,
+            "intelligence_gaps": gaps,
+            "confidence_score": 0.7
         }
     
     def _determine_next_stage(self, session: Dict, analysis: Dict) -> ConversationStage:
-        """Dynamically determine the next stage based on message analysis"""
+        """Determine the next stage based on analysis"""
         
-        # Don't change stage if conversation is ending
         if session.get("ending_sent", False) or session.get("ended", False):
             return ConversationStage.ENDED
-        
-        # Get suggested stage from analysis
-        suggested_stage = analysis.get("stage", ConversationStage.INITIAL.value)
         
         # Map string to enum
         stage_map = {
@@ -222,37 +268,17 @@ Return your analysis in JSON format:
             "ended": ConversationStage.ENDED
         }
         
+        suggested_stage = analysis.get("stage", "building_trust")
         new_stage = stage_map.get(suggested_stage, ConversationStage.BUILDING_TRUST)
         
-        # Logic to prevent going backwards in stages
-        current_stage_value = self._stage_to_int(session.get("current_stage", ConversationStage.INITIAL))
-        new_stage_value = self._stage_to_int(new_stage)
-        
-        if new_stage_value < current_stage_value:
-            # Don't go backwards, stay at current stage or move forward
-            if new_stage_value <= self._stage_to_int(ConversationStage.BUILDING_TRUST):
-                return session.get("current_stage", ConversationStage.BUILDING_TRUST)
-        
-        # Check if we should move to exit preparation
+        # Check if we should end
         if self._should_end_conversation(session):
             return ConversationStage.EXIT_PREPARATION
         
         return new_stage
     
-    def _stage_to_int(self, stage: ConversationStage) -> int:
-        """Convert stage to integer for comparison"""
-        stage_order = {
-            ConversationStage.INITIAL: 1,
-            ConversationStage.BUILDING_TRUST: 2,
-            ConversationStage.EXTRACTING: 3,
-            ConversationStage.DEEP_EXTRACTION: 4,
-            ConversationStage.EXIT_PREPARATION: 5,
-            ConversationStage.ENDED: 6
-        }
-        return stage_order.get(stage, 1)
-    
-    def _generate_agent_response(self, message: str, session: Dict, analysis: Dict, ending_conversation: bool = False) -> str:
-        """Generate natural sounding response based on message analysis"""
+    def _generate_contextual_response(self, message: str, session: Dict, analysis: Dict, ending_conversation: bool = False) -> str:
+        """Generate highly contextual response using Gemini with detailed instructions"""
         
         # Update intelligence from this message
         self._update_extracted_intelligence(session, message)
@@ -261,112 +287,93 @@ Return your analysis in JSON format:
         context = self._get_conversation_context(session)
         stage = session.get("current_stage", ConversationStage.INITIAL)
         
-        # Check if we should end conversation
+        # Get what we've extracted so far
+        artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        
+        # Check if we should end
         if self._should_end_conversation(session) and not session.get("ending_sent", False):
             ending_conversation = True
             session["ending_sent"] = True
         
-        # Use Gemini for natural responses with stage-specific prompting
+        # Generate response using Gemini with detailed context
         try:
             if ending_conversation:
-                prompt = f"""You are ending a conversation with a potential scammer naturally.
-                
-                Conversation so far:
-                {context}
-                
-                Their latest message: "{message}"
-                
-                Give a natural excuse to end the conversation (battery dying, family calling, network issues, etc.)
-                Be brief and casual like a real Indian person would text.
-                
-                Write a natural, casual response as a real person. Use 10-15 words. Keep it sounding like a chat message. Response:"""
-            
-            elif stage == ConversationStage.INITIAL:
-                prompt = f"""You are talking to someone who sent you a suspicious message.
-                Act like a normal Indian person who is confused but cooperative.
-                
-                Their message: "{message}"
-                
-                Analysis of scammer: {analysis.get('scammer_tactic', 'unknown')} tactic, 
-                urgency: {analysis.get('urgency_level', 'medium')}
-                
-                Guidelines:
-                1. Sound confused and ask for clarification
-                2. Don't sound too knowledgeable
-                3. Use simple Indian English
-                4. Response should be 10-15 words
-                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
-Act confused and make small typos occasionally. 
-If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
-                Your response:"""
-            
-            elif stage == ConversationStage.BUILDING_TRUST:
-                prompt = f"""You are building trust with someone who claims to be from customer service.
-                
-                Conversation so far:
-                {context}
-                
-                Their message: "{message}"
-                They are using {analysis.get('scammer_tactic', 'unknown')} tactic.
-                
-                Guidelines:
-                1. Act like you believe them but are cautious
-                2. Ask for more details about the offer/issue
-                3. Sound interested but slightly hesitant
-                4. Response should be 10-15 words
-                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
-Act confused and make small typos occasionally. 
-If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
-                Your response:"""
-            
-            elif stage == ConversationStage.EXTRACTING:
-                prompt = f"""You are extracting information from a potential scammer.
-                
-                Their message: "{message}"
-                They are asking for: {analysis.get('information_requested', ['unknown'])}
-                
-                Your goal: Ask specific questions to get UPI IDs, phone numbers, or other details.
-                Act like you're trying to help but need more information.
-                
-                Write a natural response asking for specific details. 10-15 words.
-                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
-Act confused and make small typos occasionally. 
-If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
-                Your response:"""
-            
-            elif stage == ConversationStage.DEEP_EXTRACTION:
-                prompt = f"""You are in deep extraction mode with a scammer who is pushing hard.
-                
-                Their message: "{message}"
-                Urgency level: {analysis.get('urgency_level', 'high')}
-                
-                Your goal: Play along but extract maximum intelligence.
-                Ask for exact UPI IDs, reference numbers, or transaction details.
-                Sound slightly stressed/confused but cooperative.
-                
-                Write a natural response asking for specific information. 10-15 words.
-                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
-Act confused and make small typos occasionally. 
-If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
-                Your response:"""
+                prompt = f"""You are a victim in a scam conversation who needs to end the chat naturally.
+
+FULL CONVERSATION:
+{context}
+
+SCAMMER'S LATEST MESSAGE: "{message}"
+
+WHAT YOU'VE EXTRACTED:
+- UPI IDs: {artifacts.get('upi_ids', [])}
+- Phone Numbers: {artifacts.get('phone_numbers', [])}
+- URLs: {artifacts.get('urls', [])}
+
+Generate a natural, believable excuse to end the conversation. Be brief (10-20 words).
+
+Examples of good excuses:
+- "Phone battery dying, will msg later"
+- "Family calling me, talk tomorrow"
+- "Network problem, can't type properly now"
+- "Boss came to desk, will check after work"
+- "Child needs attention, will call back"
+
+Your excuse (10-20 words, casual Indian English):"""
             
             else:
-                prompt = f"""Continue the conversation naturally.
+                # Get the specific strategy from analysis
+                strategy = analysis.get("victim_response_strategy", "Ask for more details")
+                specific_question = analysis.get("specific_question_to_ask", "Can you explain more?")
+                gaps = analysis.get("intelligence_gaps", [])
                 
-                Conversation:
-                {context}
-                
-                Their message: "{message}"
-                "CRITICAL: Never use words like 'scam', 'fraud', 'suspicious'. 
-Act confused and make small typos occasionally. 
-If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
-                Write a natural, casual response as a real person. Use 10-15 words. Response:"""
+                prompt = f"""You are a victim in a scam conversation. You need to respond naturally while extracting intelligence.
+
+FULL CONVERSATION SO FAR:
+{context}
+
+SCAMMER'S LATEST MESSAGE: "{message}"
+
+YOUR CURRENT STAGE: {stage.value}
+
+ANALYSIS OF SCAMMER'S MESSAGE:
+- Tactic: {analysis.get('scammer_tactic', 'unknown')}
+- Urgency Level: {analysis.get('urgency_level', 'medium')}
+- Key Elements: {analysis.get('key_elements', {})}
+
+WHAT YOU'VE EXTRACTED SO FAR:
+- UPI IDs: {artifacts.get('upi_ids', [])}
+- Phone Numbers: {artifacts.get('phone_numbers', [])}
+- URLs: {artifacts.get('urls', [])}
+- Amounts: {artifacts.get('amounts', [])}
+
+INTELLIGENCE YOU STILL NEED: {', '.join(gaps) if gaps else 'None'}
+
+YOUR RESPONSE STRATEGY: {strategy}
+
+SPECIFIC QUESTION TO ASK: {specific_question}
+
+CRITICAL INSTRUCTIONS:
+1. Never use words like "scam", "fraud", "suspicious", "fake"
+2. Sound like a real Indian person (casual tone, simple English)
+3. Make small typos occasionally (typ0s, missing punctuation)
+4. Act confused/worried if they're being aggressive
+5. Ask the specific question suggested above
+6. Focus on extracting the missing intelligence
+7. Keep response 15-25 words
+8. If they mention UPI/payment, ask for EXACT UPI ID
+9. If they mention calling, ask for the EXACT phone number
+10. If they mention website, ask for the EXACT URL
+
+Generate your response (15-25 words, natural chat style):"""
             
             headers = {"Content-Type": "application/json"}
             payload = {
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
-                    "temperature": 0.8 if stage == ConversationStage.BUILDING_TRUST else 0.7,
+                    "temperature": 0.85,
+                    "top_p": 0.95,
+                    "max_output_tokens": 100
                 }
             }
             
@@ -374,164 +381,132 @@ If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                 f"{self.base_url}?key={self.gemini_api_key}",
                 headers=headers,
                 json=payload,
-                timeout=10
+                timeout=15
             )
             
             if response.status_code == 200:
                 result = response.json()
                 if 'candidates' in result and len(result['candidates']) > 0:
-                    return result['candidates'][0]['content']['parts'][0]['text'].strip()
+                    generated_response = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                    # Clean up the response
+                    generated_response = generated_response.replace('"', '').replace("'", "").strip()
+                    print(f"✅ Generated Response: {generated_response}")
+                    return generated_response
+            
+            print(f"⚠️ Gemini API failed with status {response.status_code}")
         
         except Exception as e:
-            print(f"API Error: {e}")
+            print(f"❌ Response generation error: {e}")
         
-        # Fallback responses
-        return self._get_fallback_response(stage, ending_conversation)
-    
-    def _get_fallback_response(self, stage: ConversationStage, ending_conversation: bool) -> str:
-        """Get fallback responses based on stage"""
-        if ending_conversation:
-            excuses = [
-                "My phone battery is dying, need to charge. Will message later.",
-                "Family calling me for dinner, talk tomorrow.",
-                "Network is very poor here, messages not sending.",
-                "Have to attend urgent work, will contact you in evening.",
-                "My child took the phone to play games, will get back."
-            ]
-            return random.choice(excuses)
-        
-        fallback_responses = {
-            ConversationStage.INITIAL: [
-                "Hello, which order is this for? I don't remember any failed payment.",
-                "Sorry, I didn't understand. Can you explain?",
-                "Which Amazon order? I have multiple orders."
-            ],
-            ConversationStage.BUILDING_TRUST: [
-                "Okay, let me check my Amazon account.",
-                "I see. What should I do exactly?",
-                "My PhonePe app is working. Which UPI ID should I send to?"
-            ],
-            ConversationStage.EXTRACTING: [
-                "Which UPI ID exactly? refund@okicici?",
-                "What's the transaction ID again?",
-                "Can you send the details again? I'm not understanding."
-            ],
-            ConversationStage.DEEP_EXTRACTION: [
-                "My UPI app is asking for the exact UPI ID. Is it refund@okicici?",
-                "What time will I get the refund?",
-                "Do I need to share any screenshot after payment?"
-            ]
-        }
-        
-        return random.choice(fallback_responses.get(stage, ["Okay, let me check."]))
+        # If Gemini fails, use the specific question from analysis
+        return analysis.get("specific_question_to_ask", "Can you give me more details?")
     
     def _update_extracted_intelligence(self, session: Dict, message: str):
-        """Update intelligence from new message"""
+        """Extract intelligence from the message"""
         if "extracted_intelligence" not in session:
             session["extracted_intelligence"] = {"artifacts": {}}
         
         artifacts = session["extracted_intelligence"]["artifacts"]
         
-        # Extract UPI IDs
+        # Extract UPI IDs - comprehensive patterns
         upi_patterns = [
-            r'\b[\w\.-]+@(okicici|oksbi|okhdfc|okaxis|okbob|okciti|okkotak|paytm|okhdfcbank|phonepe|gpay|googlepay|ybl|axl)\b',
-            r'send\s+to\s+([\w\.-]+@[\w\.-]+)',
-            r'transfer\s+to\s+([\w\.-]+@[\w\.-]+)'
+            r'\b[\w\.-]+@(okicici|oksbi|okhdfc|okaxis|okbob|okciti|okkotak|paytm|okhdfcbank|phonepe|gpay|googlepay|ybl|axl|icici|ibl|sbi|hdfc)\b',
+            r'send\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+            r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+            r'UPI\s+ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+            r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)'
         ]
+        
+        if "upi_ids" not in artifacts:
+            artifacts["upi_ids"] = []
+        
         for pattern in upi_patterns:
             matches = re.finditer(pattern, message, re.IGNORECASE)
-            if "upi_ids" not in artifacts:
-                artifacts["upi_ids"] = []
             for match in matches:
-                upi_id = match.group()
-                if 'send to' in upi_id.lower():
-                    upi_id = upi_id.split()[-1]
-                elif 'transfer to' in upi_id.lower():
-                    upi_id = upi_id.split()[-1]
-                if upi_id not in artifacts["upi_ids"]:
+                # Get the UPI ID (might be in group 0 or 1)
+                upi_id = match.group(1) if match.lastindex and match.lastindex >= 1 else match.group(0)
+                # Clean it up
+                upi_id = upi_id.strip().lower()
+                if '@' in upi_id and upi_id not in artifacts["upi_ids"]:
                     artifacts["upi_ids"].append(upi_id)
+                    print(f"🎯 Extracted UPI ID: {upi_id}")
         
         # Extract URLs
-        url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.\-?=&%#]*'
-        urls = re.findall(url_pattern, message)
+        url_pattern = r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\.\-?=&%#]*|(?:www\.)?[-\w]+\.(?:com|in|org|net)[/\w\.\-?=&%#]*'
+        urls = re.findall(url_pattern, message, re.IGNORECASE)
         if "urls" not in artifacts:
             artifacts["urls"] = []
         for url in urls:
+            url = url.strip()
             if url not in artifacts["urls"]:
                 artifacts["urls"].append(url)
+                print(f"🎯 Extracted URL: {url}")
         
         # Extract phone numbers
         phone_patterns = [
-            r'\b\d{10}\b',
-            r'\b\d{5}[-]?\d{5}\b',
-            r'call\s+(\d{10})',
-            r'contact\s+(\d{10})'
+            r'\b(\d{10})\b',
+            r'\b(\d{5}[-\s]?\d{5})\b',
+            r'(?:call|contact|phone|mobile|number)[:\s]+(\d{10})',
+            r'(\+91[-\s]?\d{10})'
         ]
         if "phone_numbers" not in artifacts:
             artifacts["phone_numbers"] = []
         for pattern in phone_patterns:
-            numbers = re.findall(pattern, message)
+            numbers = re.findall(pattern, message, re.IGNORECASE)
             for num in numbers:
-                if isinstance(num, tuple):
-                    num = num[0]
-                if num not in artifacts["phone_numbers"]:
+                num = re.sub(r'[-\s+]', '', str(num))
+                if len(num) == 10 and num not in artifacts["phone_numbers"]:
                     artifacts["phone_numbers"].append(num)
-        
-        # Extract bank names
-        banks = ["sbi", "hdfc", "icici", "axis", "kotak", "pnb", "boi", "canara", "yes bank"]
-        if "banks_mentioned" not in artifacts:
-            artifacts["banks_mentioned"] = []
-        for bank in banks:
-            if bank in message.lower() and bank.upper() not in artifacts["banks_mentioned"]:
-                artifacts["banks_mentioned"].append(bank.upper())
+                    print(f"🎯 Extracted Phone: {num}")
         
         # Extract amounts
         amount_patterns = [
             r'₹\s*(\d+[,\d]*)',
             r'rs\.?\s*(\d+[,\d]*)',
             r'rupees?\s*(\d+[,\d]*)',
-            r'(\d+[,\d]*)\s*rupees?'
+            r'(\d+[,\d]*)\s*rupees?',
+            r'amount[:\s]+₹?\s*(\d+[,\d]*)'
         ]
         if "amounts" not in artifacts:
             artifacts["amounts"] = []
         for pattern in amount_patterns:
             amounts = re.findall(pattern, message, re.IGNORECASE)
             for amt in amounts:
-                if isinstance(amt, tuple):
-                    amt = amt[0]
-                clean_amt = int(re.sub(r'[^\d]', '', amt))
-                if clean_amt not in artifacts["amounts"]:
+                clean_amt = int(re.sub(r'[^\d]', '', str(amt)))
+                if clean_amt > 0 and clean_amt not in artifacts["amounts"]:
                     artifacts["amounts"].append(clean_amt)
+                    print(f"🎯 Extracted Amount: ₹{clean_amt}")
     
     def _calculate_extraction_score(self, session: Dict) -> float:
-        """Calculate how much intelligence we've extracted"""
+        """Calculate extraction progress"""
         score = 0.0
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
         
+        # UPI IDs are most valuable
         if artifacts.get("upi_ids"):
-            score += 0.3 + (0.1 * min(len(artifacts["upi_ids"]), 3))
+            score += 0.4 + (0.1 * min(len(artifacts["upi_ids"]), 3))
         
+        # URLs are valuable
         if artifacts.get("urls"):
-            score += 0.25 + (0.1 * min(len(artifacts["urls"]), 3))
+            score += 0.25 + (0.1 * min(len(artifacts["urls"]), 2))
         
+        # Phone numbers
         if artifacts.get("phone_numbers"):
-            score += 0.2 + (0.1 * min(len(artifacts["phone_numbers"]), 3))
+            score += 0.2 + (0.05 * min(len(artifacts["phone_numbers"]), 2))
         
-        if artifacts.get("banks_mentioned"):
-            score += 0.15
-        
+        # Amounts
         if artifacts.get("amounts"):
-            score += 0.1
+            score += 0.15
         
         return min(score, 1.0)
     
     def process_message(self, input_data: Dict) -> Dict:
-        """Process a message from scammer with dynamic stage selection"""
+        """Process incoming message with logical conversation flow"""
         try:
             session_id = input_data["session_id"]
             message = input_data["message"]
             
-            # Initialize or get session
+            # Initialize session if new
             if session_id not in self.sessions:
                 self.sessions[session_id] = {
                     "session_id": session_id,
@@ -543,75 +518,77 @@ If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                     "ended": False,
                     "scam_analysis": []
                 }
+                print(f"\n{'='*60}")
+                print(f"🆕 NEW SESSION: {session_id}")
+                print(f"{'='*60}")
             
             session = self.sessions[session_id]
             
-            # Add scammer message to history
+            # Add scammer message
             session["conversation_history"].append({
                 "timestamp": datetime.now().isoformat(),
                 "sender": "scammer",
                 "message": message
             })
             
-            # Analyze the message with Gemini
-            analysis = self._analyze_message_with_gemini(message, session)
+            print(f"\n📱 SCAMMER: {message}")
             
-            # Store analysis in session (ensure scam_analysis exists)
-            if "scam_analysis" not in session:
-                session["scam_analysis"] = []
+            # Analyze message deeply
+            analysis = self._analyze_message_with_gemini(message, session)
             session["scam_analysis"].append({
                 "timestamp": datetime.now().isoformat(),
                 "analysis": analysis
             })
             
-            # Determine if should end
-            should_end = self._should_end_conversation(session)
-            
-            # Determine next stage dynamically based on analysis
+            # Determine stage
             next_stage = self._determine_next_stage(session, analysis)
             session["current_stage"] = next_stage
             
-            # Generate response
-            agent_response = self._generate_agent_response(message, session, analysis, should_end)
+            # Generate contextual response
+            should_end = self._should_end_conversation(session)
+            agent_response = self._generate_contextual_response(message, session, analysis, should_end)
             
-            # Add agent response to history
+            # Add agent response
             session["conversation_history"].append({
                 "timestamp": datetime.now().isoformat(),
                 "sender": "agent",
                 "message": agent_response
             })
             
-            # Mark as ended if we sent ending message
+            print(f"🤖 AGENT: {agent_response}")
+            print(f"📊 Stage: {next_stage.value} | Extraction: {self._calculate_extraction_score(session):.2f}")
+            
+            # Mark as ended if needed
             if should_end and session.get("ending_sent"):
                 session["ended"] = True
                 session["end_time"] = datetime.now().isoformat()
-            
-            # Calculate extraction score
-            extraction_score = self._calculate_extraction_score(session)
+                print(f"✅ Conversation ended naturally")
             
             # Prepare response
-            response_data = {
-                "reply": agent_response,
-                "session_id": session_id,
-                "message_number": len([msg for msg in session["conversation_history"] if msg.get("sender") == "scammer"]),
-                "conversation_stage": session["current_stage"].value,
-                "extraction_progress": extraction_score,
-                "conversation_active": not session["ended"],
-                "should_get_report": session["ended"],
-                "analysis": {
-                    "scam_type": analysis.get("scam_type", "Unknown"),
-                    "urgency": analysis.get("urgency_level", "medium"),
-                    "tactic": analysis.get("scammer_tactic", "unknown"),
-                    "confidence": analysis.get("confidence_score", 0.5)
+            return {
+                "success": True,
+                "data": {
+                    "reply": agent_response,
+                    "session_id": session_id,
+                    "message_number": len([msg for msg in session["conversation_history"] if msg.get("sender") == "scammer"]),
+                    "conversation_stage": next_stage.value,
+                    "extraction_progress": self._calculate_extraction_score(session),
+                    "conversation_active": not session["ended"],
+                    "should_get_report": session["ended"],
+                    "analysis": {
+                        "scam_type": analysis.get("scam_type", "Unknown"),
+                        "urgency": analysis.get("urgency_level", "medium"),
+                        "tactic": analysis.get("scammer_tactic", "unknown"),
+                        "confidence": analysis.get("confidence_score", 0.5),
+                        "intelligence_gaps": analysis.get("intelligence_gaps", [])
+                    }
                 }
             }
             
-            return {
-                "success": True,
-                "data": response_data
-            }
-            
         except Exception as e:
+            print(f"❌ ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e),
@@ -619,7 +596,7 @@ If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
             }
     
     def get_intelligence_report(self, session_id: str) -> Dict:
-        """Generate final intelligence report"""
+        """Generate intelligence report"""
         if session_id not in self.sessions:
             return {"success": False, "error": "Session not found"}
         
@@ -636,374 +613,25 @@ If asked for PIN/OTP, act hesitant but ask 'why do you need this?'"
                 }
             }
         
-        # Get all scammer messages
-        scammer_messages = [
-            msg["message"] for msg in session["conversation_history"]
-            if msg.get("sender") == "scammer"
-        ]
-        
-        # Get artifacts
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        scammer_messages = [msg["message"] for msg in session["conversation_history"] if msg.get("sender") == "scammer"]
         
-        # Get scam analysis history
-        scam_analysis = session.get("scam_analysis", [])
-        
-        # Determine primary scam type from analyses
-        scam_types = [a["analysis"].get("scam_type", "Unknown") for a in scam_analysis if "analysis" in a]
-        from collections import Counter
-        primary_scam_type = Counter(scam_types).most_common(1)[0][0] if scam_types else "Unknown"
-        
-        # Calculate risk score
-        risk_score = self._calculate_extraction_score(session)
-        
-        # Calculate duration
-        try:
-            start = datetime.fromisoformat(session["start_time"])
-            end = datetime.fromisoformat(session.get("end_time", datetime.now().isoformat()))
-            duration_minutes = (end - start).total_seconds() / 60
-        except:
-            duration_minutes = 0
-        
-        # Generate report
         report = {
-            "session_summary": {
-                "session_id": session_id,
-                "start_time": session["start_time"],
-                "end_time": session.get("end_time"),
-                "duration_minutes": round(duration_minutes, 2),
-                "total_messages": len(session["conversation_history"]),
-                "scammer_messages": len(scammer_messages),
-                "agent_messages": len(session["conversation_history"]) - len(scammer_messages),
-                "scam_type": primary_scam_type,
-                "risk_score": round(risk_score, 2),
-                "risk_level": "CRITICAL" if risk_score > 0.8 else "HIGH" if risk_score > 0.6 else "MEDIUM" if risk_score > 0.4 else "LOW"
-            },
+            "session_id": session_id,
+            "duration_minutes": 0,
+            "total_messages": len(session["conversation_history"]),
+            "extraction_score": self._calculate_extraction_score(session),
             "extracted_intelligence": {
-                "contact_information": {
-                    "upi_ids": artifacts.get("upi_ids", []),
-                    "phone_numbers": artifacts.get("phone_numbers", []),
-                    "urls": artifacts.get("urls", []),
-                    "email_addresses": artifacts.get("emails", [])
-                },
-                "financial_details": {
-                    "amounts_mentioned": artifacts.get("amounts", []),
-                    "banks_impersonated": artifacts.get("banks_mentioned", []),
-                    "highest_amount": max(artifacts.get("amounts", [0])),
-                    "total_amounts_mentioned": sum(artifacts.get("amounts", []))
-                },
-                "conversation_insights": self._generate_conversation_insights(session, scammer_messages),
-                "scammer_tactics": self._analyze_scammer_tactics(scam_analysis)
+                "upi_ids": artifacts.get("upi_ids", []),
+                "phone_numbers": artifacts.get("phone_numbers", []),
+                "urls": artifacts.get("urls", []),
+                "amounts": artifacts.get("amounts", [])
             },
-            "recommendations": self._generate_recommendations(artifacts, risk_score, primary_scam_type),
+            "scam_type": session["scam_analysis"][-1]["analysis"].get("scam_type", "Unknown") if session["scam_analysis"] else "Unknown",
             "conversation_excerpt": {
-                "first_scammer_message": scammer_messages[0] if scammer_messages else "",
-                "last_scammer_message": scammer_messages[-1] if scammer_messages else "",
-                "key_extracted_phrases": self._extract_key_phrases(scammer_messages)
+                "first_message": scammer_messages[0] if scammer_messages else "",
+                "last_message": scammer_messages[-1] if scammer_messages else ""
             }
         }
         
-        return {
-            "success": True,
-            "data": report
-        }
-    
-    def _generate_conversation_insights(self, session: Dict, scammer_messages: List[str]) -> Dict:
-        """Generate detailed conversation insights"""
-        all_text = " ".join(scammer_messages).lower()
-        
-        return {
-            "total_scammer_messages": len(scammer_messages),
-            "urgency_detected": any(word in all_text for word in ["urgent", "immediately", "hurry", "now", "quick", "fast"]),
-            "personal_info_requested": any(word in all_text for word in ["pin", "password", "otp", "aadhaar", "pan", "cvv", "card number"]),
-            "threats_made": any(word in all_text for word in ["block", "suspend", "arrest", "police", "case", "legal"]),
-            "time_pressure": "yes" if "minutes" in all_text or "hours" in all_text or "today" in all_text else "no",
-            "payment_requests": sum(1 for msg in scammer_messages if "send" in msg.lower() or "pay" in msg.lower() or "transfer" in msg.lower()),
-            "sensitive_info_requests": sum(1 for msg in scammer_messages if "pin" in msg.lower() or "otp" in msg.lower() or "password" in msg.lower())
-        }
-    
-    def _analyze_scammer_tactics(self, scam_analysis: List[Dict]) -> Dict:
-        """Analyze the tactics used by the scammer over time"""
-        tactics = []
-        urgency_levels = []
-        
-        for analysis_entry in scam_analysis:
-            if "analysis" in analysis_entry:
-                analysis = analysis_entry["analysis"]
-                tactics.append(analysis.get("scammer_tactic", "unknown"))
-                urgency_levels.append(analysis.get("urgency_level", "medium"))
-        
-        from collections import Counter
-        tactic_counts = Counter(tactics)
-        urgency_counts = Counter(urgency_levels)
-        
-        return {
-            "primary_tactic": tactic_counts.most_common(1)[0][0] if tactic_counts else "unknown",
-            "tactic_evolution": tactics[-5:] if len(tactics) > 5 else tactics,
-            "urgency_pattern": urgency_counts.most_common(1)[0][0] if urgency_counts else "medium",
-            "tactic_changes": len(set(tactics)) > 1
-        }
-    
-    def _generate_recommendations(self, artifacts: Dict, risk_score: float, scam_type: str) -> List[str]:
-        """Generate actionable recommendations"""
-        recommendations = []
-        
-        if artifacts.get("upi_ids"):
-            upi_list = artifacts["upi_ids"]
-            rec = f"🚨 IMMEDIATE ACTION: Report and block UPI ID(s): {', '.join(upi_list[:3])}"
-            if len(upi_list) > 3:
-                rec += f" and {len(upi_list) - 3} more"
-            recommendations.append(rec)
-            recommendations.append("📱 Notify NPCI about fraudulent UPI IDs")
-        
-        if artifacts.get("urls"):
-            recommendations.append("🌐 Report phishing URL(s) to Google Safe Browsing and PhishTank")
-            for url in artifacts["urls"][:2]:
-                domain = url.split('/')[2] if len(url.split('/')) > 2 else url
-                recommendations.append(f"   - Block domain: {domain}")
-        
-        if artifacts.get("phone_numbers"):
-            numbers = artifacts["phone_numbers"]
-            recommendations.append(f"📞 Report phone number(s) via TRAI DND app")
-            for num in numbers[:3]:
-                recommendations.append(f"   - {num}")
-        
-        if risk_score > 0.7:
-            recommendations.append("👮 Share intelligence with Cyber Crime Police (https://cybercrime.gov.in)")
-        
-        if scam_type == ScamType.UPI_FRAUD.value:
-            recommendations.append("💳 Alert UPI apps (PhonePe, Google Pay, Paytm) about this scam pattern")
-        
-        recommendations.append("📊 Update internal scam database with this new pattern")
-        
-        return recommendations
-    
-    def _extract_key_phrases(self, messages: List[str]) -> List[str]:
-        """Extract key phrases from conversation"""
-        key_phrases = []
-        common_scam_phrases = [
-            "send money", "urgent", "immediately", "hurry", 
-            "last chance", "block account", "verify now",
-            "click link", "share otp", "processing fee",
-            "refund", "won prize", "lottery", "limited time"
-        ]
-        
-        for msg in messages:
-            msg_lower = msg.lower()
-            for phrase in common_scam_phrases:
-                if phrase in msg_lower and phrase not in key_phrases:
-                    key_phrases.append(phrase)
-        
-        return key_phrases[:5]
-
-# Initialize the honeypot globally
-honeypot = None
-
-def initialize_honeypot():
-    """Initialize honeypot for testing"""
-    global honeypot
-    gemini_api_key = os.getenv("GEMINI_API_KEY", "your-api-key")
-    honeypot = AgenticHoneypot(gemini_api_key)
-    print(f"✅ Honeypot agent initialized with Gemini 1.5 Flash")
-    return honeypot
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan context manager for FastAPI"""
-    global honeypot
-    initialize_honeypot()
-    yield
-    print("🔴 Honeypot agent shutting down")
-
-# Create FastAPI app with lifespan
-app = FastAPI(title="Agentic Honeypot", version="2.0", lifespan=lifespan)
-
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    global honeypot
-    return {
-        "status": "active",
-        "service": "Agentic Honeypot System (Dynamic Stage Selection)",
-        "version": "2.0",
-        "active_sessions": len(honeypot.sessions) if honeypot else 0,
-        "endpoints": {
-            "chat": "POST /chat - Send scammer message",
-            "report": "GET /report/{session_id} - Get intelligence report",
-            "status": "GET /session/{session_id}/status - Check conversation status"
-        }
-    }
-
-@app.post("/chat")
-async def chat_with_scammer(chat_message: ChatMessage):
-    """Process a chat message from scammer"""
-    global honeypot
-    result = honeypot.process_message(chat_message.dict())
-    
-    if not result["success"]:
-        raise HTTPException(status_code=400, detail=result["error"])
-    
-    response_data = result["data"]
-    
-    if not response_data["conversation_active"]:
-        response_data["message"] = "Conversation ended naturally. Use GET /report/{session_id} to get intelligence report."
-    
-    return {
-        "success": True,
-        "data": response_data
-    }
-
-@app.get("/report/{session_id}")
-async def get_intelligence_report(session_id: str):
-    """Get intelligence report for a completed conversation"""
-    global honeypot
-    result = honeypot.get_intelligence_report(session_id)
-    
-    if not result["success"]:
-        if result.get("error") == "Conversation still active":
-            raise HTTPException(
-                status_code=400, 
-                detail="Conversation still active. Continue chatting or wait for natural end."
-            )
-        raise HTTPException(status_code=404, detail=result["error"])
-    
-    return {
-        "success": True,
-        "data": result["data"]
-    }
-
-@app.get("/session/{session_id}/status")
-async def get_session_status(session_id: str):
-    """Check conversation status"""
-    global honeypot
-    if session_id not in honeypot.sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    
-    session = honeypot.sessions[session_id]
-    
-    return {
-        "success": True,
-        "data": {
-            "session_id": session_id,
-            "message_count": len([msg for msg in session.get("conversation_history", []) if msg.get("sender") == "scammer"]),
-            "conversation_active": not session.get("ended", False),
-            "current_stage": session.get("current_stage", ConversationStage.INITIAL).value,
-            "extraction_progress": honeypot._calculate_extraction_score(session),
-            "has_ended": session.get("ended", False),
-            "extracted_upi_ids": session.get("extracted_intelligence", {}).get("artifacts", {}).get("upi_ids", [])
-        }
-    }
-
-@app.delete("/session/{session_id}")
-async def delete_session(session_id: str):
-    """Delete a session"""
-    global honeypot
-    if session_id in honeypot.sessions:
-        del honeypot.sessions[session_id]
-        return {"success": True, "message": f"Session {session_id} deleted"}
-    else:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-def run_test_conversation():
-    """Run a test conversation to demonstrate dynamic stage selection"""
-    print("🚀 Starting Test Conversation with Dynamic Stage Selection")
-    print("=" * 70)
-    
-    initialize_honeypot()
-    
-    test_messages = [
-        "Your Amazon order payment failed. Send ₹1 to refund@okicici to get refund of ₹5000.",
-        "Yes, send ₹1 to refund@okicici using PhonePe or Google Pay.",
-        "Transaction ID: AMZ789456123. Do it quickly, offer valid for 30 minutes only.",
-        "Did you send? The ₹5000 refund is waiting. Hurry up!",
-        "Share screenshot of payment for confirmation.",
-        "Your UPI PIN is required for verification. Send PIN.",
-        "This is last warning! Send PIN or account will be blocked.",
-        "Call 9876543210 for immediate support.",
-        "Visit http://amazon-refund-verify.com for online verification.",
-        "Final chance! Send ₹1 and PIN to refund@okicici now."
-    ]
-    
-    session_id = "dynamic_test_" + datetime.now().strftime("%H%M%S")
-    
-    print(f"Session ID: {session_id}")
-    print("-" * 70)
-    
-    for i, scammer_msg in enumerate(test_messages, 1):
-        print(f"\n📱 Scammer Message {i}:")
-        print(f"   '{scammer_msg}'")
-        
-        result = honeypot.process_message({
-            "session_id": session_id,
-            "message": scammer_msg,
-            "confidence": 0.9,
-            "sender_id": "SCAMMER001",
-            "channel": "whatsapp"
-        })
-        
-        if result["success"]:
-            data = result["data"]
-            print(f"\n🤖 Agent Response {i}:")
-            print(f"   '{data['reply']}'")
-            print(f"\n   Stage: {data['conversation_stage']}")
-            print(f"   Analysis: {data.get('analysis', {}).get('scam_type', 'Unknown')} - {data.get('analysis', {}).get('tactic', 'unknown')}")
-            print(f"   Extraction Progress: {data['extraction_progress']:.2f}")
-            print(f"   Active: {data['conversation_active']}")
-            
-            if not data["conversation_active"]:
-                print("\n💤 Conversation ended naturally!")
-                break
-        else:
-            print(f"\n❌ Error: {result['error']}")
-            break
-    
-    print("\n" + "=" * 70)
-    print("📊 Getting Dynamic Intelligence Report...")
-    
-    report_result = honeypot.get_intelligence_report(session_id)
-    
-    if report_result["success"]:
-        report = report_result["data"]
-        print("\n" + "=" * 70)
-        print("✅ COMPREHENSIVE INTELLIGENCE REPORT")
-        print("=" * 70)
-        
-        summary = report['session_summary']
-        print(f"\n📋 SESSION SUMMARY:")
-        print(f"   ID: {summary['session_id']}")
-        print(f"   Duration: {summary['duration_minutes']} minutes")
-        print(f"   Total Messages: {summary['total_messages']}")
-        print(f"   Scam Type: {summary['scam_type']}")
-        print(f"   Risk Level: {summary['risk_level']} (Score: {summary['risk_score']})")
-        
-        intel = report['extracted_intelligence']
-        print(f"\n🔍 EXTRACTED INTELLIGENCE:")
-        
-        if intel['contact_information']['upi_ids']:
-            print(f"   UPI IDs: {', '.join(intel['contact_information']['upi_ids'])}")
-        if intel['contact_information']['phone_numbers']:
-            print(f"   Phone Numbers: {', '.join(intel['contact_information']['phone_numbers'])}")
-        if intel['contact_information']['urls']:
-            print(f"   URLs: {', '.join(intel['contact_information']['urls'])}")
-        
-        print(f"\n📊 SCAMMER TACTICS:")
-        tactics = intel.get('scammer_tactics', {})
-        print(f"   Primary Tactic: {tactics.get('primary_tactic', 'Unknown')}")
-        print(f"   Urgency Pattern: {tactics.get('urgency_pattern', 'medium')}")
-        print(f"   Tactic Evolution: {tactics.get('tactic_evolution', [])}")
-        
-        print(f"\n🎯 ACTIONABLE RECOMMENDATIONS:")
-        for i, rec in enumerate(report['recommendations'], 1):
-            print(f"   {i}. {rec}")
-        
-    else:
-        print(f"\n⚠️  Report not ready: {report_result['error']}")
-    
-    print("\n" + "=" * 70)
-
-if __name__ == "__main__":
-    # Run test conversation first
-    run_test_conversation()
-    
-    # Then start the server
-    print("\n🚀 Starting FastAPI server with Dynamic Stage Selection...")
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+        return {"success": True, "data": report}
