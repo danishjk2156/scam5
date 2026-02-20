@@ -1,271 +1,238 @@
 # -*- coding: utf-8 -*-
 """
-Improved NLP Module for Scam Detection
+NLP Module for Scam Detection
 Analyzes entire conversation history, not just single messages
-FULLY FIXED VERSION - Standardized field names
 """
 
 import re
 from typing import List, Dict
 
+
+def _get_msg_text(msg: Dict) -> str:
+    """Helper: read message text regardless of field name (text or message)"""
+    return msg.get("text") or msg.get("message") or ""
+
+
 def detect_scam_intent(text: str, conversation_history: List[Dict] = None) -> bool:
-    """
-    Detect scam intent from message and conversation history
-    
-    Args:
-        text: Current message text
-        conversation_history: List of previous messages (optional)
-    
-    Returns:
-        True if scam detected, False otherwise
-    """
+    """Detect scam intent from message and conversation history"""
     keywords = [
         "urgent", "immediately", "blocked", "suspended",
         "verify", "upi", "account", "otp", "kyc", "today",
         "send", "pay", "transfer", "money", "rupee", "rs",
         "pin", "password", "cvv", "aadhaar", "pan",
-        "warning", "last chance", "expire", "limited time"
+        "warning", "last chance", "expire", "limited time",
+        "cashback", "refund", "won", "prize", "lottery",
+        "customs", "parcel", "courier", "insurance", "loan"
     ]
-    
-    # Check current message
+
     text_lower = text.lower()
     score = sum(1 for k in keywords if k in text_lower)
-    
-    # Also check conversation history if provided
+
+    # Check conversation history
     if conversation_history:
         for msg in conversation_history:
-            # FIXED: Standardized to check "sender" field
-            if msg.get("sender") == "scammer":
-                msg_text = msg.get("message", "").lower()
-                score += sum(0.5 for k in keywords if k in msg_text)  # Half weight for history
-    
-    # FIXED: Lower threshold for better detection
+            if msg.get("sender", "").lower() == "scammer":
+                msg_text = _get_msg_text(msg).lower()   # FIXED: checks both "text" and "message"
+                score += sum(0.5 for k in keywords if k in msg_text)
+
     return score >= 1.5
 
 
 def detect_scam_type(text: str, conversation_history: List[Dict] = None) -> str:
-    """
-    Detect type of scam from message and conversation history
-    
-    Args:
-        text: Current message text
-        conversation_history: List of previous messages (optional)
-    
-    Returns:
-        Scam type string
-    """
-    # Combine all text for analysis
+    """Detect type of scam from message and conversation history"""
     all_text = text.lower()
-    
+
     if conversation_history:
         for msg in conversation_history:
-            # FIXED: Standardized to check "sender" field
-            if msg.get("sender") == "scammer":
-                msg_text = msg.get("message", "")
-                all_text += " " + msg_text.lower()
-    
-    # Check for different scam types
-    if "upi" in all_text or "@ok" in all_text or "@ybl" in all_text or "@paytm" in all_text:
+            if msg.get("sender", "").lower() == "scammer":
+                all_text += " " + _get_msg_text(msg).lower()   # FIXED
+
+    if "upi" in all_text or "@ok" in all_text or "@ybl" in all_text or "@paytm" in all_text or "cashback" in all_text:
         return "UPI Fraud"
-    
-    if "bank" in all_text or "account" in all_text:
+    if "phish" in all_text or "click" in all_text or "http" in all_text or "link" in all_text:
+        return "Phishing"
+    if "bank" in all_text or "account" in all_text or "sbi" in all_text or "hdfc" in all_text:
         return "Bank Impersonation"
-    
-    if "won" in all_text or "prize" in all_text or "lottery" in all_text:
+    if "won" in all_text or "prize" in all_text or "lottery" in all_text or "congratulations" in all_text:
         return "Lottery Scam"
-    
-    if "kyc" in all_text or "verify" in all_text or "update" in all_text:
+    if "kyc" in all_text or "update" in all_text:
         return "KYC Scam"
-    
     if "otp" in all_text or "pin" in all_text or "password" in all_text:
         return "Credential Theft"
-    
-    if "refund" in all_text or "cashback" in all_text:
+    if "refund" in all_text:
         return "Refund Scam"
-    
-    if "courier" in all_text or "parcel" in all_text or "delivery" in all_text:
+    if "courier" in all_text or "parcel" in all_text or "delivery" in all_text or "customs" in all_text:
         return "Courier Scam"
-    
     if "loan" in all_text or "credit" in all_text:
         return "Loan Scam"
-    
-    # If urgency + payment request detected, it's likely a scam
+    if "insurance" in all_text or "policy" in all_text:
+        return "Insurance Scam"
+    if "job" in all_text or "work from home" in all_text or "salary" in all_text:
+        return "Job Scam"
+    if "income tax" in all_text or "it department" in all_text or "tax refund" in all_text:
+        return "Tax Scam"
+    if "electricity" in all_text or "bill" in all_text or "disconnection" in all_text:
+        return "Utility Scam"
+    if "crypto" in all_text or "bitcoin" in all_text or "investment" in all_text:
+        return "Investment Scam"
+    if "tech support" in all_text or "virus" in all_text or "microsoft" in all_text:
+        return "Tech Support Scam"
+
     urgency_words = ["urgent", "immediately", "hurry", "quick", "now", "today"]
-    payment_words = ["send", "pay", "transfer", "deposit", "₹", "rupee"]
-    
-    has_urgency = any(word in all_text for word in urgency_words)
-    has_payment = any(word in all_text for word in payment_words)
-    
-    if has_urgency and has_payment:
+    payment_words = ["send", "pay", "transfer", "deposit", "rupee"]
+    if any(w in all_text for w in urgency_words) and any(w in all_text for w in payment_words):
         return "Payment Scam"
-    
+
     return "Unknown"
 
 
 def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> dict:
-    """
-    Extract intelligence from message and conversation history
-    
-    Args:
-        text: Current message text
-        conversation_history: List of previous messages (optional)
-    
-    Returns:
-        Dictionary with extracted intelligence
-    """
-    # Combine all scammer messages for analysis
+    """Extract all intelligence from message and conversation history"""
+
+    # Combine all scammer messages
     all_text = text
-    
     if conversation_history:
         for msg in conversation_history:
-            # FIXED: Standardized to check "sender" field
-            if msg.get("sender") == "scammer":
-                msg_text = msg.get("message", "")
-                all_text += " " + msg_text
-    
-    # Extract UPI IDs - improved patterns
+            if msg.get("sender", "").lower() == "scammer":
+                all_text += " " + _get_msg_text(msg)   # FIXED
+
+    # ── UPI IDs ──────────────────────────────────────────────────────────────
     upi_patterns = [
-        r'\b[\w\.-]+@(?:okicici|oksbi|okhdfc|okaxis|paytm|phonepe|ybl|axl)\b',  # Common UPI handles
-        r'\b[\w\.-]+@[a-zA-Z]{2,}\b',  # Generic UPI pattern
-        r'send (?:to |money to |₹\d+ to )?([a-zA-Z0-9.\-_]+@[a-zA-Z]+)',  # Extract from instructions
+        r'\b[\w\.-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|okciti|okkotak|paytm|okhdfcbank|phonepe|gpay|googlepay|ybl|axl|icici|ibl|sbi|hdfc|fakebank|fakeupi)\b',
+        r'send\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+        r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+        r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+        r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+        r'\b([a-zA-Z0-9\._-]+@[a-zA-Z0-9]{3,})\b',   # generic catch-all
     ]
-    
     upi_ids = set()
     for pattern in upi_patterns:
-        matches = re.findall(pattern, all_text, re.IGNORECASE)
-        for match in matches:
-            if isinstance(match, tuple):
-                match = match[0] if match else ""
-            # Filter out email-like patterns that aren't UPI
-            if match and '@' in match and not any(domain in match.lower() for domain in ['gmail', 'yahoo', 'hotmail', 'outlook']):
-                upi_ids.add(match.lower())
-    
-    # Extract phone numbers - multiple formats
+        for match in re.findall(pattern, all_text, re.IGNORECASE):
+            val = match[0] if isinstance(match, tuple) else match
+            val = val.strip().lower()
+            # Keep only if it looks like UPI (has @) and is not a plain email domain
+            if '@' in val and not any(d in val for d in ['gmail', 'yahoo', 'hotmail', 'outlook']):
+                upi_ids.add(val)
+
+    # ── Phone Numbers ─────────────────────────────────────────────────────────
     phone_patterns = [
-        r'\+91[-\s]?\d{10}',  # +91 format
-        r'\b91\d{10}\b',  # 91 format
-        r'\b[6-9]\d{9}\b',  # Indian mobile number
-        r'call\s+(?:on\s+)?(\d{10})',  # "call 1234567890"
-        r'contact\s+(?:on\s+)?(\d{10})',  # "contact 1234567890"
+        r'\+91[-\s]?\d{10}',
+        r'\b91\d{10}\b',
+        r'\b[6-9]\d{9}\b',
+        r'(?:call|contact|phone|mobile|number|reach)[:\s]+(\+?91[-\s]?\d{10}|\d{10})',
     ]
-    
     phone_numbers = set()
     for pattern in phone_patterns:
-        matches = re.findall(pattern, all_text, re.IGNORECASE)
-        for match in matches:
-            # Clean and normalize
-            if isinstance(match, tuple):
-                match = match[0] if match else ""
-            clean_number = re.sub(r'[^\d]', '', str(match))
-            if len(clean_number) >= 10:
-                # Add +91 prefix if not present
-                if len(clean_number) == 10:
-                    phone_numbers.add(f"+91{clean_number}")
-                elif len(clean_number) == 12 and clean_number.startswith('91'):
-                    phone_numbers.add(f"+{clean_number}")
-                else:
-                    phone_numbers.add(f"+{clean_number}")
-    
-    # Extract phishing links - improved pattern
+        for match in re.findall(pattern, all_text, re.IGNORECASE):
+            val = match[0] if isinstance(match, tuple) else match
+            clean = re.sub(r'[^\d]', '', str(val))
+            if len(clean) == 10:
+                phone_numbers.add(f"+91{clean}")
+            elif len(clean) == 12 and clean.startswith('91'):
+                phone_numbers.add(f"+{clean}")
+
+    # ── Phishing Links ────────────────────────────────────────────────────────
     link_patterns = [
-        r'https?://[^\s]+',  # Standard http/https links
-        r'www\.[^\s]+',  # www. links
-        r'\b[a-z0-9-]+\.[a-z]{2,}(?:/[^\s]*)?\b',  # domain.com/path
+        r'https?://[^\s<>"\']+',
+        r'www\.[^\s<>"\']+',
     ]
-    
     phishing_links = set()
+    legit_domains = ['google', 'facebook', 'twitter', 'linkedin', 'youtube', 'wikipedia']
     for pattern in link_patterns:
-        matches = re.findall(pattern, all_text, re.IGNORECASE)
-        for match in matches:
-            # Filter out legitimate domains
-            if not any(legit in match.lower() for legit in ['google', 'facebook', 'twitter', 'linkedin']):
+        for match in re.findall(pattern, all_text, re.IGNORECASE):
+            match = match.rstrip('.,)')
+            if not any(d in match.lower() for d in legit_domains):
                 phishing_links.add(match)
-    
-    # Extract suspicious keywords
-    suspicious_keywords = []
+
+    # ── Bank Accounts ─────────────────────────────────────────────────────────
+    bank_patterns = [
+        r'account\s*(?:number|no\.?|#)[:\s]+(\d{9,18})',
+        r'a/?c\s*(?:number|no\.?|#)?[:\s]+(\d{9,18})',
+        r'\b(\d{9,18})\b',
+    ]
+    bank_accounts = set()
+    for pattern in bank_patterns:
+        for match in re.findall(pattern, all_text, re.IGNORECASE):
+            clean = re.sub(r'\D', '', str(match))
+            # Must be 9-18 digits and NOT a phone number
+            if 9 <= len(clean) <= 18 and not any(clean == re.sub(r'\D','',p) for p in phone_numbers):
+                bank_accounts.add(clean)
+
+    # ── Email Addresses ───────────────────────────────────────────────────────
+    email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
+    raw_emails = set(re.findall(email_pattern, all_text, re.IGNORECASE))
+    # Keep only real emails (domain has a dot) and exclude UPI IDs already captured
+    email_addresses = {
+        e for e in raw_emails
+        if '.' in e.split('@')[1] and e.lower() not in upi_ids
+    }
+
+    # ── Case / Reference IDs ──────────────────────────────────────────────────
+    case_id_patterns = [
+        r'(?:case|ticket|ref(?:erence)?|complaint|order|policy|SR|CR)\s*(?:id|no\.?|#)?[:\s]+([A-Z0-9\-]{4,20})',
+    ]
+    case_ids = set()
+    for pattern in case_id_patterns:
+        for match in re.findall(pattern, all_text, re.IGNORECASE):
+            case_ids.add(match.strip())
+
+    # ── Suspicious Keywords ───────────────────────────────────────────────────
     keyword_list = [
         "urgent", "immediately", "verify", "blocked", "suspended",
-        "account", "otp", "pin", "password", "kyc", "aadhaar",
-        "expire", "limited time", "last chance", "warning",
-        "send money", "transfer", "pay now"
+        "otp", "pin", "password", "kyc", "aadhaar", "expire",
+        "limited time", "last chance", "warning", "send money",
+        "transfer", "pay now", "cashback", "refund", "lottery", "prize"
     ]
-    
     text_lower = all_text.lower()
-    for keyword in keyword_list:
-        if keyword in text_lower and keyword not in suspicious_keywords:
-            suspicious_keywords.append(keyword)
-    
+    suspicious_keywords = [k for k in keyword_list if k in text_lower]
+
     return {
         "upiIds": list(upi_ids),
         "phoneNumbers": list(phone_numbers),
         "phishingLinks": list(phishing_links),
+        "bankAccounts": list(bank_accounts),
+        "emailAddresses": list(email_addresses),
+        "caseIds": list(case_ids),
         "suspiciousKeywords": suspicious_keywords
     }
 
 
 def analyze_conversation_for_scam(conversation_history: List[Dict]) -> Dict:
-    """
-    Analyze entire conversation to detect scam patterns
-    
-    Args:
-        conversation_history: List of all messages in conversation
-    
-    Returns:
-        Dictionary with analysis results
-    """
+    """Analyze entire conversation to detect scam patterns"""
+    empty = {
+        "scamDetected": False, "scamType": "Unknown", "confidence": 0.0,
+        "intelligence": {
+            "upiIds": [], "phoneNumbers": [], "phishingLinks": [],
+            "bankAccounts": [], "emailAddresses": [], "suspiciousKeywords": []
+        }
+    }
+
     if not conversation_history:
-        return {
-            "scamDetected": False,
-            "scamType": "Unknown",
-            "confidence": 0.0,
-            "intelligence": {
-                "upiIds": [],
-                "phoneNumbers": [],
-                "phishingLinks": [],
-                "suspiciousKeywords": []
-            }
-        }
-    
-    # Get all scammer messages
-    scammer_messages = []
-    for msg in conversation_history:
-        # FIXED: Standardized to check "sender" field
-        if msg.get("sender") == "scammer":
-            scammer_messages.append(msg.get("message", ""))
-    
+        return empty
+
+    scammer_messages = [
+        _get_msg_text(msg)                    # FIXED
+        for msg in conversation_history
+        if msg.get("sender", "").lower() == "scammer"
+    ]
+
     if not scammer_messages:
-        return {
-            "scamDetected": False,
-            "scamType": "Unknown",
-            "confidence": 0.0,
-            "intelligence": {
-                "upiIds": [],
-                "phoneNumbers": [],
-                "phishingLinks": [],
-                "suspiciousKeywords": []
-            }
-        }
-    
-    # Analyze all messages together
+        return empty
+
     all_scammer_text = " ".join(scammer_messages)
-    
     scam_detected = detect_scam_intent(all_scammer_text)
     scam_type = detect_scam_type(all_scammer_text)
     intelligence = extract_intelligence(all_scammer_text)
-    
-    # Calculate confidence based on intelligence extracted
+
     confidence = 0.0
-    if intelligence["upiIds"]:
-        confidence += 0.4
-    if intelligence["phoneNumbers"]:
-        confidence += 0.3
-    if intelligence["phishingLinks"]:
-        confidence += 0.2
-    if len(intelligence["suspiciousKeywords"]) >= 3:
-        confidence += 0.3
-    
+    if intelligence["upiIds"]:         confidence += 0.35
+    if intelligence["phoneNumbers"]:   confidence += 0.25
+    if intelligence["phishingLinks"]:  confidence += 0.20
+    if intelligence["bankAccounts"]:   confidence += 0.15
+    if intelligence["emailAddresses"]: confidence += 0.10
+    if len(intelligence["suspiciousKeywords"]) >= 3: confidence += 0.20
     confidence = min(confidence, 1.0)
-    
+
     return {
         "scamDetected": scam_detected or confidence > 0.3,
         "scamType": scam_type,
