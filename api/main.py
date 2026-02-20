@@ -82,13 +82,11 @@ class HoneypotRequest(BaseModel):
     metadata: Optional[Metadata] = None
 
 class ExtractedIntelligence(BaseModel):
+    phoneNumbers: List[str] = []
     bankAccounts: List[str] = []
     upiIds: List[str] = []
     phishingLinks: List[str] = []
-    phoneNumbers: List[str] = []
     emailAddresses: List[str] = []
-    caseIds: List[str] = []
-    suspiciousKeywords: List[str] = []
 
 class EngagementMetrics(BaseModel):
     engagementDurationSeconds: int
@@ -253,23 +251,29 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
     # ---------- Merge intelligence from both NLP and agent artifacts ----------
     artifacts = honeypot.sessions[session_id].get("extracted_intelligence", {}).get("artifacts", {})
 
-    # Merge all sources and deduplicate
+    def fmt_phone(p: str) -> str:
+        """Reformat +91XXXXXXXXXX → +91-XXXXXXXXXX"""
+        clean = re.sub(r'[^\d]', '', p)
+        if len(clean) == 12 and clean.startswith('91'):
+            return f"+91-{clean[2:]}"
+        if len(clean) == 10:
+            return f"+91-{clean}"
+        return p
+
+    # Merge all sources, deduplicate, format phones
+    raw_phones = list(set(intelligence.get("phoneNumbers", []) + artifacts.get("phone_numbers", [])))
+    all_phones = [fmt_phone(p) for p in raw_phones]
     all_upi = list(set(intelligence.get("upiIds", []) + artifacts.get("upi_ids", [])))
-    all_phones = list(set(intelligence.get("phoneNumbers", []) + artifacts.get("phone_numbers", [])))
     all_links = list(set(intelligence.get("phishingLinks", []) + artifacts.get("urls", [])))
     all_banks = list(set(intelligence.get("bankAccounts", []) + artifacts.get("bank_accounts", [])))
     all_emails = list(set(intelligence.get("emailAddresses", []) + artifacts.get("emails", []) + artifacts.get("email_addresses", [])))
-    all_case_ids = list(set(intelligence.get("caseIds", []) + artifacts.get("case_ids", [])))
-    all_keywords = list(set(intelligence.get("suspiciousKeywords", [])))
 
     extracted_intel = ExtractedIntelligence(
-        upiIds=all_upi,
         phoneNumbers=all_phones,
+        upiIds=all_upi,
         phishingLinks=all_links,
         bankAccounts=all_banks,
         emailAddresses=all_emails,
-        caseIds=all_case_ids,
-        suspiciousKeywords=all_keywords
     )
 
     # ---------- Save intelligence to Supabase ----------
@@ -279,7 +283,6 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
         phone_numbers=extracted_intel.phoneNumbers,
         phishing_links=extracted_intel.phishingLinks,
         bank_accounts=extracted_intel.bankAccounts,
-        suspicious_keywords=extracted_intel.suspiciousKeywords
     )
 
     # ---------- Update session in Supabase ----------
@@ -338,8 +341,6 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
             "bank_accounts": extracted_intel.bankAccounts,
             "phishing_links": extracted_intel.phishingLinks,
             "email_addresses": extracted_intel.emailAddresses,
-            "case_ids": extracted_intel.caseIds,
-            "suspicious_keywords": extracted_intel.suspiciousKeywords
         }
 
         SupabaseService.create_report(
@@ -472,17 +473,13 @@ def send_final_report_to_guvi(
         "totalMessagesExchanged": total_messages,
         "engagementDurationSeconds": duration_seconds,
         "extractedIntelligence": {
+            "phoneNumbers": extracted_intelligence.phoneNumbers,
             "bankAccounts": extracted_intelligence.bankAccounts,
             "upiIds": extracted_intelligence.upiIds,
             "phishingLinks": extracted_intelligence.phishingLinks,
-            "phoneNumbers": extracted_intelligence.phoneNumbers,
             "emailAddresses": extracted_intelligence.emailAddresses,
-            "caseIds": extracted_intelligence.caseIds,
-            "suspiciousKeywords": extracted_intelligence.suspiciousKeywords
         },
         "agentNotes": agent_notes,
-        "scamType": scam_type,
-        "confidenceLevel": confidence
     }
 
     try:
