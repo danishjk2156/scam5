@@ -1,0 +1,284 @@
+# 🍯 Agentic Honeypot — Scam Detection & Intelligence Extraction
+
+An AI-powered conversational honeypot that engages scammers, extracts intelligence (phone numbers, UPI IDs, bank accounts, phishing links, emails), and reports findings to the GUVI hackathon API.
+
+---
+
+## 📁 Project Structure
+
+```
+├── main.py                  # FastAPI server — all endpoints and request handling
+├── agent/
+│   └── agentic_honeypot.py  # Gemini-powered agent — conversation logic & intel extraction
+├── nlp_module.py            # Rule-based NLP — scam detection, type classification, intel extraction
+├── supabase_db.py           # Supabase database service — sessions, messages, reports
+├── .env                     # Your environment variables (never commit this)
+└── .env.example             # Template for environment variables
+```
+
+---
+
+## ⚙️ Setup
+
+### 1. Clone & install dependencies
+
+```bash
+pip install fastapi uvicorn python-dotenv requests supabase pydantic
+```
+
+### 2. Configure environment variables
+
+```bash
+cp .env.example .env
+# Edit .env and fill in your keys
+```
+
+| Variable | Description | Where to get it |
+|---|---|---|
+| `SECRET_KEY` | API key for authenticating requests | Set any strong random string |
+| `GEMINI_API_KEY` | Google Gemini API key | [aistudio.google.com](https://aistudio.google.com/app/apikey) |
+| `SUPABASE_URL` | Your Supabase project URL | Supabase Dashboard → Project Settings → API |
+| `SUPABASE_KEY` | Supabase service_role key | Supabase Dashboard → Project Settings → API |
+
+> ⚠️ Use the **service_role** key for `SUPABASE_KEY`, not the anon key. Enable Gemini **billing** for production — the free tier allows only 500 requests/day.
+
+### 3. Run the server
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+---
+
+## 🔌 API Endpoints
+
+All endpoints (except `/`) require the header:
+```
+X-Api-Key: <your SECRET_KEY>
+```
+
+### `POST /honeypot/message`
+Main endpoint. Send a scammer message, receive the honeypot's reply and extracted intelligence.
+
+**Request body:**
+```json
+{
+  "sessionId": "abc123-session-id",
+  "message": {
+    "sender": "scammer",
+    "text": "URGENT: Your SBI account will be blocked. Share your OTP immediately.",
+    "timestamp": 1700000000000
+  },
+  "conversationHistory": [],
+  "metadata": {
+    "channel": "SMS",
+    "language": "English",
+    "locale": "IN"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "status": "success",
+  "sessionId": "abc123-session-id",
+  "scamDetected": true,
+  "scamType": "Bank Impersonation",
+  "reply": "Which RBI regulation says I must share my OTP with you?",
+  "conversationActive": true,
+  "stage": "extracting",
+  "extractionProgress": 0.45,
+  "shouldGetReport": false,
+  "engagementMetrics": {
+    "totalMessagesExchanged": 3,
+    "engagementDurationSeconds": 12
+  },
+  "extractedIntelligence": {
+    "phoneNumbers": ["+91-9876543210"],
+    "bankAccounts": ["1234567890123456"],
+    "upiIds": ["scammer.fraud@fakebank"],
+    "phishingLinks": ["http://malicious-site.com"],
+    "emailAddresses": ["scammer@fake.com"]
+  },
+  "agentNotes": "Used urgency tactics in 3 messages; Requested OTP/PIN 3 times..."
+}
+```
+
+---
+
+### `GET /`
+Health check.
+
+```json
+{
+  "status": "healthy",
+  "service": "Agentic Honeypot API",
+  "database": "connected",
+  "active_sessions": 2
+}
+```
+
+---
+
+### `GET /session/{session_id}/status`
+Get the current status of a session.
+
+```json
+{
+  "status": "success",
+  "sessionId": "abc123",
+  "conversationActive": true,
+  "stage": "deep_extraction",
+  "messageCount": 8,
+  "extractionProgress": 0.75,
+  "scamDetected": true,
+  "scamType": "Bank Impersonation"
+}
+```
+
+---
+
+### `POST /session/{session_id}/force-report`
+Force-generate a final report for a session (useful if the conversation ended unexpectedly).
+
+---
+
+### `GET /stats`
+Get aggregate statistics across all sessions.
+
+```json
+{
+  "status": "success",
+  "data": {
+    "total_sessions": 42,
+    "active_sessions": 3,
+    "scams_detected": 38,
+    "detection_rate": 0.9,
+    "scam_type_distribution": {
+      "Bank Impersonation": 15,
+      "KYC Scam": 8,
+      "UPI Fraud": 7
+    }
+  }
+}
+```
+
+---
+
+### `GET /reports/recent?limit=20`
+Get the most recent scam reports.
+
+---
+
+## 🧠 How It Works
+
+### Conversation Flow
+
+```
+Scammer sends message
+        ↓
+NLP Module (rule-based, instant)
+  • detect_scam_intent()   → is this a scam?
+  • detect_scam_type()     → what kind?
+  • extract_intelligence() → phone, UPI, bank, links, emails
+        ↓
+Agentic Honeypot (Gemini-powered)
+  • Analyses scammer tactics
+  • Picks an investigative question to extract more intel
+  • Generates a natural, worried-victim reply
+        ↓
+Intelligence merged (NLP + agent artifacts)
+        ↓
+Report sent to GUVI API (every turn, upsert pattern)
+        ↓
+Response returned to caller
+```
+
+### Intelligence Extraction Rules
+
+| Type | How detected | Example |
+|---|---|---|
+| **Phone numbers** | Indian mobile patterns (+91, 6-9 prefix) | `+91-9876543210` |
+| **UPI IDs** | `@domain` with NO dot in domain | `scammer@fakebank` |
+| **Email addresses** | `@domain.tld` with dot in domain | `scammer@fake.com` |
+| **Bank accounts** | 9-18 digit numbers after "account number" context | `1234567890123456` |
+| **Phishing links** | `http://` or `www.` URLs not on legit domain whitelist | `http://sbi-verify.tk` |
+
+### Scam Types Detected
+
+`Bank Impersonation` · `KYC Scam` · `UPI Fraud` · `Phishing` · `Credential Theft` · `Lottery Scam` · `Courier Scam` · `Loan Scam` · `Insurance Scam` · `Job Scam` · `Tax Scam` · `Utility Scam` · `Tech Support Scam` · `Investment Scam` · `Refund Scam` · `Payment Scam`
+
+### Conversation Stages
+
+| Stage | Description |
+|---|---|
+| `initial` | First scammer message received |
+| `building_trust` | Honeypot establishing credibility |
+| `extracting` | Actively extracting intel |
+| `deep_extraction` | High-value intel being probed |
+| `exit_preparation` | Preparing to end conversation |
+| `ended` | Conversation complete, report filed |
+
+---
+
+## 📤 GUVI Report Format
+
+The system POSTs this payload to `https://hackathon.guvi.in/api/updateHoneyPotFinalResult` after **every scammer message** (upsert pattern):
+
+```json
+{
+  "sessionId": "abc123-session-id",
+  "scamDetected": true,
+  "totalMessagesExchanged": 18,
+  "engagementDurationSeconds": 95,
+  "extractedIntelligence": {
+    "phoneNumbers": ["+91-9876543210"],
+    "bankAccounts": ["1234567890123456"],
+    "upiIds": ["scammer.fraud@fakebank"],
+    "phishingLinks": ["http://malicious-site.com"],
+    "emailAddresses": ["scammer@fake.com"]
+  },
+  "agentNotes": "Used urgency tactics in 9 messages; Requested OTP 10 times; Identified scam type: Bank Impersonation"
+}
+```
+
+---
+
+## 🗄️ Supabase Tables Required
+
+| Table | Purpose |
+|---|---|
+| `honeypot_sessions` | Session state, conversation history, stage |
+| `extracted_intelligence` | Per-session extracted artefacts |
+| `scam_reports` | Final reports per session |
+| `analytics_metrics` | Event tracking (session starts, messages) |
+
+---
+
+## 🧪 Quick Test
+
+```bash
+curl -X POST http://localhost:8000/honeypot/message \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: your_secret_key" \
+  -d '{
+    "sessionId": "test-001",
+    "message": {
+      "sender": "scammer",
+      "text": "URGENT: Your SBI account will be blocked. Share OTP now.",
+      "timestamp": 1700000000000
+    },
+    "conversationHistory": [],
+    "metadata": { "channel": "SMS", "language": "English", "locale": "IN" }
+  }'
+```
+
+---
+
+## 🔒 Security Notes
+
+- Never commit `.env` to version control — add it to `.gitignore`
+- Rotate `SECRET_KEY` before deploying to production
+- Use Supabase **service_role** key server-side only; never expose it to clients
+- Gemini API key should have billing enabled and usage limits set in Google Cloud Console
