@@ -136,6 +136,7 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
     2. engagementDurationSeconds included in final GUVI payload
     3. Bank accounts, emails, case IDs extracted
     4. Turn count never ends before 10 scammer messages
+    5. FIX: scam_type now always propagated into session so generate_agent_notes reads it correctly
     """
 
     if x_api_key != SECRET_KEY:
@@ -210,13 +211,16 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
             "start_time": session_start_times[session_id].isoformat(),
             "current_stage": ConversationStage.INITIAL,
             "extracted_intelligence": {"artifacts": {}},
-            "scam_type": scam_type,
+            "scam_type": scam_type,          # NLP result stored at init
             "scam_analysis": [],
             "ending_sent": False,
             "ended": False
         }
     else:
         honeypot.sessions[session_id]["conversation_history"] = full_conversation
+        # FIX: always keep scam_type in sync with the latest NLP result so
+        # generate_agent_notes can fall back to it when scam_analysis is empty.
+        honeypot.sessions[session_id]["scam_type"] = scam_type
         if "scam_analysis" not in honeypot.sessions[session_id]:
             honeypot.sessions[session_id]["scam_analysis"] = []
         if "ending_sent" not in honeypot.sessions[session_id]:
@@ -309,7 +313,7 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
     agent_notes = generate_agent_notes(session)
 
     # ----------
-    # FIX: Send final output to GUVI on EVERY turn (upsert).
+    # Send final output to GUVI on EVERY turn (upsert).
     # Previously only sent when conversation ended — meaning the
     # evaluator's 10-second wait window was often missed entirely.
     # Now we always have the latest report submitted.
@@ -318,7 +322,7 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
         session_id=session_id,
         scam_detected=scam_detected,
         total_messages=total_messages,
-        duration_seconds=duration_seconds,      # FIX: was missing from payload
+        duration_seconds=duration_seconds,
         extracted_intelligence=extracted_intel,
         agent_notes=agent_notes,
         scam_type=scam_type
@@ -412,11 +416,18 @@ def generate_agent_notes(session: Dict) -> str:
     if artifacts.get("email_addresses"):
         notes.append(f"Shared email address(es): {', '.join(artifacts['email_addresses'])}")
 
+    # FIX: was reading only from scam_analysis (often empty) and falling through to "Unknown".
+    # Now: try scam_analysis first (richer agent data), then fall back to the NLP-derived
+    # scam_type stored directly on the session object, which is always kept in sync.
     scam_analysis = session.get("scam_analysis", [])
+    resolved_scam_type = "Unknown"
     if scam_analysis:
         last = scam_analysis[-1].get("analysis", {})
-        scam_type = last.get("scam_type", "Unknown")
-        notes.append(f"Identified scam type: {scam_type}")
+        resolved_scam_type = last.get("scam_type", "Unknown")
+    if resolved_scam_type == "Unknown":
+        resolved_scam_type = session.get("scam_type", "Unknown")
+
+    notes.append(f"Identified scam type: {resolved_scam_type}")
 
     return "; ".join(notes) if notes else "No significant patterns detected"
 
@@ -425,15 +436,14 @@ def send_final_report_to_guvi(
     session_id: str,
     scam_detected: bool,
     total_messages: int,
-    duration_seconds: int,           # FIX: added parameter
+    duration_seconds: int,
     extracted_intelligence: ExtractedIntelligence,
     agent_notes: str,
     scam_type: str = "Unknown"
 ) -> Optional[Dict]:
     """
-    FIX: Now called on EVERY turn (upsert pattern).
-    FIX: Now includes engagementDurationSeconds in payload.
-    FIX: Now includes scamType and confidenceLevel for extra Response Structure points.
+    Called on EVERY turn (upsert pattern) so the evaluator always has the latest report.
+    Includes engagementDurationSeconds, scamType, and confidenceLevel.
     """
     callback_url = "https://hackathon.guvi.in/api/updateHoneyPotFinalResult"
 
@@ -455,7 +465,7 @@ def send_final_report_to_guvi(
         "sessionId": session_id,
         "scamDetected": scam_detected,
         "totalMessagesExchanged": total_messages,
-        "engagementDurationSeconds": duration_seconds,   # FIX: was missing
+        "engagementDurationSeconds": duration_seconds,
         "extractedIntelligence": {
             "bankAccounts": extracted_intelligence.bankAccounts,
             "upiIds": extracted_intelligence.upiIds,
@@ -466,8 +476,8 @@ def send_final_report_to_guvi(
             "suspiciousKeywords": extracted_intelligence.suspiciousKeywords
         },
         "agentNotes": agent_notes,
-        "scamType": scam_type,               # FIX: optional field for +1 point
-        "confidenceLevel": confidence         # FIX: optional field for +1 point
+        "scamType": scam_type,
+        "confidenceLevel": confidence
     }
 
     try:
@@ -490,8 +500,8 @@ def health_check():
     supabase = get_supabase()
     return {
         "status": "healthy",
-        "service": "Agentic Honeypot API — FIXED v3.0",
-        "version": "3.0",
+        "service": "Agentic Honeypot API — FIXED v3.1",
+        "version": "3.1",
         "database": "connected" if supabase else "disconnected",
         "active_sessions": len(honeypot.sessions) if honeypot else 0
     }

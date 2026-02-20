@@ -30,33 +30,35 @@ class ConversationStage(Enum):
     ENDED = "ended"
 
 
+# Rotating investigative questions — used by fallback and repetition guard
+INVESTIGATIVE_QUESTIONS = [
+    "Can you give me your official company email so I can verify before doing anything?",
+    "What is the exact branch address I should visit to confirm this in person?",
+    "Is there a senior manager or supervisor I can speak to right now?",
+    "Can you send me an official SMS from the SBI registered number first?",
+    "What is your full name and staff ID badge number please?",
+    "Can you tell me which RBI regulation requires me to share my OTP with you?",
+    "What is the name of your branch and the state it is in?",
+    "Can you give me a case number I can verify on the official SBI website?",
+    "Why can I not visit the branch directly instead of sharing details over chat?",
+    "Can you confirm the last 4 digits of my registered mobile number first?",
+]
+
+
 class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
         self.gemini_api_key = gemini_api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
-        self.min_messages_before_end = 10   # FIX: raised from 8
+        self.min_messages_before_end = 10
         self.max_messages_per_session = 20
-
-        # Pool of fallback questions to avoid repeating the same line
-        self.fallback_questions = [
-            "Can you share your official company email and branch address?",
-            "What bank department exactly are you calling from?",
-            "Is there a supervisor I can speak to for verification?",
-            "Can you send me an official SMS from SBI number to confirm?",
-            "What is your staff ID and which branch are you calling from?",
-            "Can you tell me the exact name of your manager and department?",
-            "What is the official RBI helpline number I can cross-check with?",
-        ]
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
     def _get_msg_text(self, msg: Dict) -> str:
-        """Read message text regardless of field name"""
         return msg.get("text") or msg.get("message") or ""
 
     def _get_conversation_context(self, session: Dict) -> str:
-        """Format last 12 messages as readable context for Gemini"""
         context = []
         for msg in session.get("conversation_history", [])[-12:]:
             role = "Scammer" if msg.get("sender") == "scammer" else "You"
@@ -64,33 +66,61 @@ class AgenticHoneypot:
         return "\n".join(context)
 
     def _get_last_agent_reply(self, session: Dict) -> str:
-        """Return the most recent agent message text"""
         for msg in reversed(session.get("conversation_history", [])):
             if msg.get("sender") == "agent":
                 return self._get_msg_text(msg).strip()
         return ""
 
+    def _get_recent_agent_replies(self, session: Dict, n: int = 3) -> List[str]:
+        """Return last N agent replies (lowercase) for repetition checking"""
+        replies = []
+        for msg in reversed(session.get("conversation_history", [])):
+            if msg.get("sender") == "agent":
+                replies.append(self._get_msg_text(msg).strip().lower())
+                if len(replies) >= n:
+                    break
+        return replies
+
+    def _is_repeat(self, text: str, session: Dict) -> bool:
+        """Check if text closely matches any of the last 3 agent replies"""
+        text_lower = text.strip().lower()
+        recent = self._get_recent_agent_replies(session, n=3)
+        for r in recent:
+            # Exact match or very similar (first 40 chars match)
+            if text_lower == r or text_lower[:40] == r[:40]:
+                return True
+        return False
+
+    def _get_non_repeating_question(self, session: Dict) -> str:
+        """Pick a question from the pool that hasn't been used recently"""
+        recent = self._get_recent_agent_replies(session, n=6)
+        used_questions = set()
+        for q in INVESTIGATIVE_QUESTIONS:
+            for r in recent:
+                if q.lower()[:40] == r[:40]:
+                    used_questions.add(q)
+        available = [q for q in INVESTIGATIVE_QUESTIONS if q not in used_questions]
+        if available:
+            return random.choice(available)
+        # All used — shuffle and return one anyway
+        return random.choice(INVESTIGATIVE_QUESTIONS)
+
     def _should_end_conversation(self, session: Dict) -> bool:
         history = session.get("conversation_history", [])
         scammer_messages = [m for m in history if m.get("sender") == "scammer"]
 
-        # Hard minimum — never end before this
         if len(scammer_messages) < self.min_messages_before_end:
             return False
 
-        # Hard maximum
         if len(history) >= self.max_messages_per_session:
             return True
 
-        # Only end if scammer has been VERY aggressively pushing credentials
-        # across ALL recent messages, not just any mention
         recent = [self._get_msg_text(m).lower() for m in scammer_messages[-3:]]
         sensitive = ["pin", "password", "otp", "aadhaar", "pan", "cvv"]
         if sum(1 for m in recent if any(k in m for k in sensitive)) >= 3:
             if len(scammer_messages) >= 12:
                 return True
 
-        # Raise extraction threshold and require more messages
         extraction_score = self._calculate_extraction_score(session)
         if extraction_score > 0.85 and len(scammer_messages) >= 12:
             return True
@@ -100,10 +130,10 @@ class AgenticHoneypot:
     # ─── Gemini: Analyse Message ──────────────────────────────────────────────
 
     def _analyze_message_with_gemini(self, message: str, session: Dict) -> Dict:
-        """Use Gemini to analyse scammer message and plan response strategy"""
         context = self._get_conversation_context(session)
         scammer_count = len([m for m in session.get("conversation_history", []) if m.get("sender") == "scammer"])
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        recent_replies = self._get_recent_agent_replies(session, n=3)
 
         prompt = f"""You are analyzing a scam conversation to help an AI honeypot respond naturally and extract intelligence.
 
@@ -119,13 +149,16 @@ INTELLIGENCE EXTRACTED SO FAR:
 - Bank Accounts: {artifacts.get("bank_accounts", [])}
 - Emails: {artifacts.get("emails", [])}
 
+RECENT HONEYPOT REPLIES (DO NOT suggest repeating these):
+{chr(10).join(f"- {r}" for r in recent_replies)}
+
 CURRENT STAGE: {session.get("current_stage", ConversationStage.INITIAL).value}
 SCAMMER MESSAGES SO FAR: {scammer_count}
 
 Analyze and return ONLY valid JSON:
 {{
     "stage": "initial|building_trust|extracting|deep_extraction|exit_preparation",
-    "scam_type": "specific scam type",
+    "scam_type": "specific scam type detected (e.g. Bank Impersonation, KYC Scam, UPI Fraud, Phishing)",
     "urgency_level": "low|medium|high",
     "scammer_tactic": "brief description",
     "red_flags": ["list at least 3 red flags you observe in this conversation"],
@@ -137,7 +170,7 @@ Analyze and return ONLY valid JSON:
         "has_contact_info": true
     }},
     "victim_response_strategy": "how to respond to extract more intel",
-    "specific_question_to_ask": "exact investigative question to ask",
+    "specific_question_to_ask": "a DIFFERENT investigative question not already in RECENT HONEYPOT REPLIES above",
     "intelligence_gaps": ["what intel is still missing"],
     "confidence_score": 0.0
 }}"""
@@ -162,25 +195,21 @@ Analyze and return ONLY valid JSON:
                 if result.get("candidates"):
                     candidate = result["candidates"][0]
 
-                    # FIX: Check finish reason before parsing
                     finish_reason = candidate.get("finishReason", "STOP")
                     if finish_reason not in ("STOP", "stop"):
                         print(f"⚠️ Gemini analysis cut off: {finish_reason}, using fallback")
                         return self._fallback_analysis(message, session)
 
                     raw = candidate["content"]["parts"][0]["text"].strip()
-
-                    # FIX: Strip markdown code fences if Gemini wraps in ```json
                     raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
                     raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE)
                     raw = raw.strip()
 
-                    # FIX: Safe JSON extraction with proper error handling
                     match = re.search(r'\{.*\}', raw, re.DOTALL)
                     if match:
                         try:
                             analysis = json.loads(match.group())
-                            print(f"✅ Gemini Analysis: stage={analysis.get('stage')} | {analysis.get('victim_response_strategy', '')[:60]}")
+                            print(f"✅ Gemini Analysis: stage={analysis.get('stage')} | scam_type={analysis.get('scam_type')} | {analysis.get('victim_response_strategy', '')[:50]}")
                             return analysis
                         except json.JSONDecodeError as e:
                             print(f"⚠️ JSON parse failed: {e} | raw: {raw[:200]}")
@@ -201,17 +230,17 @@ Analyze and return ONLY valid JSON:
         scammer_count = len([m for m in session.get("conversation_history", []) if m.get("sender") == "scammer"])
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
 
+        # FIX: Use rotating question pool instead of fixed question per stage
+        question = self._get_non_repeating_question(session)
+
         if scammer_count <= 1:
-            stage, question = "initial", "Sorry, which account are you referring to? Can you give me your reference number?"
+            stage = "initial"
         elif scammer_count <= 3:
-            stage, question = "building_trust", "Can I get your employee ID and the official helpline number please?"
+            stage = "building_trust"
         elif scammer_count <= 6:
-            if any(w in msg_lower for w in ["send", "transfer", "payment", "upi"]):
-                stage, question = "extracting", "What is the exact UPI ID I should send to? And your phone number?"
-            else:
-                stage, question = "extracting", "What is your official website and helpline number I can verify with?"
+            stage = "extracting"
         else:
-            stage, question = "deep_extraction", "Can you give me your branch address and manager name to verify?"
+            stage = "deep_extraction"
 
         gaps = []
         if not artifacts.get("upi_ids"):       gaps.append("UPI ID needed")
@@ -225,11 +254,20 @@ Analyze and return ONLY valid JSON:
         if any(w in msg_lower for w in ["send", "transfer", "pay"]):        red_flags.append("unsolicited payment demand")
         if not red_flags: red_flags = ["unverified caller", "unsolicited contact", "pressure tactics"]
 
+        # FIX: Rule-based scam type detection in fallback
+        scam_type = "Unknown"
+        if "kyc" in msg_lower:                                              scam_type = "KYC Scam"
+        elif "upi" in msg_lower or "fakebank" in msg_lower:                 scam_type = "UPI Fraud"
+        elif "otp" in msg_lower or "pin" in msg_lower:                      scam_type = "Credential Theft"
+        elif "sbi" in msg_lower or "hdfc" in msg_lower or "bank" in msg_lower: scam_type = "Bank Impersonation"
+        elif "lottery" in msg_lower or "prize" in msg_lower:                scam_type = "Lottery Scam"
+        elif "courier" in msg_lower or "parcel" in msg_lower:               scam_type = "Courier Scam"
+
         return {
             "stage": stage,
-            "scam_type": "Unknown",
+            "scam_type": scam_type,
             "urgency_level": "high" if any(w in msg_lower for w in ["urgent", "immediately"]) else "medium",
-            "scammer_tactic": "urgency with payment request",
+            "scammer_tactic": "urgency with credential/payment request",
             "red_flags": red_flags,
             "key_elements": {
                 "has_upi_id": bool(re.search(r'@[a-zA-Z0-9]+', message)),
@@ -254,9 +292,8 @@ Analyze and return ONLY valid JSON:
         context = self._get_conversation_context(session)
         stage = session.get("current_stage", ConversationStage.INITIAL)
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
-
-        # FIX: Track last reply to prevent repetition
         last_reply = self._get_last_agent_reply(session)
+        recent_replies = self._get_recent_agent_replies(session, n=3)
 
         if self._should_end_conversation(session) and not session.get("ending_sent", False):
             ending_conversation = True
@@ -271,16 +308,20 @@ CONVERSATION:
 
 SCAMMER'S LATEST MESSAGE: "{message}"
 
-Write a short natural excuse to leave. Must be a complete sentence, 10-15 words, casual Indian English.
+Write a short natural excuse to leave. Must be a COMPLETE sentence, 10-15 words, casual Indian English.
 Examples: "Phone battery dying, will message you later", "My boss just called, speak later", "Network is very bad here, talk later"
 
 Your response (complete sentence only):"""
 
             else:
                 strategy = analysis.get("victim_response_strategy", "Ask for more details")
-                specific_question = analysis.get("specific_question_to_ask", "Can you explain more?")
+                suggested_question = analysis.get("specific_question_to_ask", "")
                 gaps = analysis.get("intelligence_gaps", [])
                 red_flags = analysis.get("red_flags", [])
+
+                # FIX: If Gemini's suggested question is a repeat, override with pool question
+                if self._is_repeat(suggested_question, session):
+                    suggested_question = self._get_non_repeating_question(session)
 
                 prompt = f"""You are playing the role of a confused, worried victim in a scam conversation. Your goal is to keep the scammer talking and extract as much information as possible.
 
@@ -303,23 +344,23 @@ STILL NEED: {", ".join(gaps) if gaps else "probe for more details"}
 RED FLAGS NOTICED: {", ".join(red_flags) if red_flags else "suspicious contact"}
 
 YOUR STRATEGY: {strategy}
-ASK THIS SPECIFIC QUESTION: {specific_question}
+ASK THIS QUESTION (incorporate naturally): {suggested_question}
 
-LAST THING YOU SAID: "{last_reply}"
+YOUR LAST 3 REPLIES — DO NOT REPEAT ANY OF THESE:
+{chr(10).join(f"- {r}" for r in recent_replies)}
 
 CRITICAL RULES:
-1. NEVER repeat or closely paraphrase what you said last time
+1. Your response MUST be completely different from all 3 recent replies above
 2. Never say "scam", "fraud", "suspicious", "fake" — stay in character as a worried victim
 3. Sound like a real Indian person — casual, simple English, slight anxiety
-4. Ask the suggested question above to extract missing intelligence
-5. Also ask ONE investigative question about: company name / employee ID / official address
-6. Mention ONE red flag (e.g. "why is this so urgent?", "this seems very unusual")
-7. Your response MUST be a complete sentence, 20-35 words maximum
-8. Do NOT start a sentence you cannot finish
-9. If payment/UPI mentioned — ask for EXACT UPI ID
-10. If phone mentioned — ask for EXACT number with employee ID
+4. Incorporate the suggested question naturally
+5. Your response MUST be a COMPLETE sentence, 20-40 words maximum
+6. Do NOT start a sentence you cannot finish
+7. If UPI mentioned — ask for EXACT UPI ID and confirm the handle
+8. If phone mentioned — ask for EXACT number with employee ID
+9. If website mentioned — ask for EXACT URL to verify
 
-Your response (complete sentence, 20-35 words):"""
+Your response (complete, different from recent replies, 20-40 words):"""
 
             response = requests.post(
                 f"{self.base_url}?key={self.gemini_api_key}",
@@ -327,9 +368,9 @@ Your response (complete sentence, 20-35 words):"""
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
-                        "temperature": 0.85,
+                        "temperature": 0.9,
                         "top_p": 0.95,
-                        "maxOutputTokens": 200   # FIX: prevents Gemini cutting off mid-sentence
+                        "maxOutputTokens": 200
                     }
                 },
                 timeout=15
@@ -340,24 +381,22 @@ Your response (complete sentence, 20-35 words):"""
                 if result.get("candidates"):
                     candidate = result["candidates"][0]
 
-                    # FIX: Check finish reason — cut-off response is unusable
                     finish_reason = candidate.get("finishReason", "STOP")
                     if finish_reason not in ("STOP", "stop"):
                         print(f"⚠️ Gemini reply cut off: {finish_reason}, using fallback")
-                        return self._get_non_repeating_fallback(last_reply, analysis)
+                        return self._get_non_repeating_question(session)
 
                     text = candidate["content"]["parts"][0]["text"].strip()
                     text = text.replace('"', '').replace("'", "").strip()
 
-                    # FIX: Guard against empty or suspiciously short replies
                     if len(text) < 10:
-                        print(f"⚠️ Gemini reply too short: '{text}', using fallback")
-                        return self._get_non_repeating_fallback(last_reply, analysis)
+                        print(f"⚠️ Gemini reply too short: '{text}', using pool question")
+                        return self._get_non_repeating_question(session)
 
-                    # FIX: Guard against repeating exact same reply
-                    if text.strip().lower() == last_reply.strip().lower():
-                        print(f"⚠️ Gemini repeated last reply, using fallback")
-                        return self._get_non_repeating_fallback(last_reply, analysis)
+                    # FIX: if still a repeat, get pool question
+                    if self._is_repeat(text, session):
+                        print(f"⚠️ Gemini generated a repeat reply, using pool question")
+                        return self._get_non_repeating_question(session)
 
                     print(f"🤖 Response: {text}")
                     return text
@@ -366,27 +405,11 @@ Your response (complete sentence, 20-35 words):"""
         except Exception as e:
             print(f"❌ Response generation error: {e}")
 
-        return self._get_non_repeating_fallback(last_reply, analysis)
-
-    def _get_non_repeating_fallback(self, last_reply: str, analysis: Dict) -> str:
-        """Return a fallback question that is different from the last reply"""
-        # Try the analysis suggested question first
-        suggested = analysis.get("specific_question_to_ask", "")
-        if suggested and suggested.strip().lower() != last_reply.strip().lower():
-            return suggested
-
-        # Pick a random fallback that doesn't match the last reply
-        options = [q for q in self.fallback_questions if q.strip().lower() != last_reply.strip().lower()]
-        if options:
-            return random.choice(options)
-
-        # Last resort
-        return "Can you please share your official company website and branch address for my records?"
+        return self._get_non_repeating_question(session)
 
     # ─── Intelligence Extraction ──────────────────────────────────────────────
 
     def _update_extracted_intelligence(self, session: Dict, message: str):
-        """Extract intelligence from scammer message into session artifacts"""
         if "extracted_intelligence" not in session:
             session["extracted_intelligence"] = {"artifacts": {}}
         artifacts = session["extracted_intelligence"]["artifacts"]
@@ -398,21 +421,21 @@ Your response (complete sentence, 20-35 words):"""
             r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
             r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
             r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-            r'\b([a-zA-Z0-9\._-]{4,}@[a-zA-Z0-9]{3,})\b',  # FIX: min 4 chars before @
+            r'\b([a-zA-Z0-9\._-]{4,}@[a-zA-Z0-9]{3,})\b',
         ]
         if "upi_ids" not in artifacts:
             artifacts["upi_ids"] = []
-        legit_email_domains = ['gmail', 'yahoo', 'hotmail', 'outlook', 'sbi.co', 'hdfcbank', 'icicibank']
+        legit_upi_domains = ['gmail', 'yahoo', 'hotmail', 'outlook', 'sbi.co', 'hdfcbank', 'icicibank']
         for pattern in upi_patterns:
             for match in re.finditer(pattern, message, re.IGNORECASE):
                 upi = match.group(1) if match.lastindex else match.group(0)
                 upi = upi.strip().lower()
-                if '@' in upi and not any(d in upi for d in legit_email_domains):
+                if '@' in upi and not any(d in upi for d in legit_upi_domains):
                     if upi not in artifacts["upi_ids"]:
                         artifacts["upi_ids"].append(upi)
                         print(f"🎯 UPI: {upi}")
 
-        # URLs — only suspicious ones
+        # URLs
         url_pattern = r'https?://[^\s<>"\']+|(?:www\.)[^\s<>"\']+'
         legit_domains = [
             'google', 'facebook', 'twitter', 'linkedin', 'youtube', 'wikipedia',
@@ -427,7 +450,7 @@ Your response (complete sentence, 20-35 words):"""
                 artifacts["urls"].append(url)
                 print(f"🎯 URL: {url}")
 
-        # Phone numbers — FIX: use negative lookbehind to avoid matching inside long numbers
+        # Phone numbers
         phone_patterns = [
             r'\+91[-\s]?\d{10}',
             r'(?<!\d)91(\d{10})(?!\d)',
@@ -449,7 +472,7 @@ Your response (complete sentence, 20-35 words):"""
                     artifacts["phone_numbers"].append(formatted)
                     print(f"🎯 Phone: {formatted}")
 
-        # Bank accounts — require contextual keywords to avoid false positives
+        # Bank accounts
         bank_patterns = [
             r'account\s*(?:number|no\.?|#)[:\s]+(\d{9,18})',
             r'a/?c\s*(?:no\.?|#)?[:\s]+(\d{9,18})',
@@ -461,7 +484,6 @@ Your response (complete sentence, 20-35 words):"""
             for match in re.findall(pattern, message, re.IGNORECASE):
                 clean = re.sub(r'\D', '', str(match))
                 if 9 <= len(clean) <= 18 and clean not in artifacts["bank_accounts"]:
-                    # FIX: make sure it doesn't overlap with a known phone number
                     is_phone = any(clean in re.sub(r'\D', '', p) for p in artifacts.get("phone_numbers", []))
                     if not is_phone:
                         artifacts["bank_accounts"].append(clean)
@@ -488,7 +510,6 @@ Your response (complete sentence, 20-35 words):"""
                     artifacts["amounts"].append(clean)
 
     def _calculate_extraction_score(self, session: Dict) -> float:
-        """Score how much intelligence has been extracted"""
         score = 0.0
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
         if artifacts.get("upi_ids"):        score += 0.35
@@ -522,7 +543,6 @@ Your response (complete sentence, 20-35 words):"""
     # ─── Main Entry Point ─────────────────────────────────────────────────────
 
     def process_message(self, input_data: Dict) -> Dict:
-        """Process incoming scammer message and return honeypot response"""
         try:
             session_id = input_data["session_id"]
             message = input_data["message"]
