@@ -28,11 +28,10 @@ def detect_scam_intent(text: str, conversation_history: List[Dict] = None) -> bo
     text_lower = text.lower()
     score = sum(1 for k in keywords if k in text_lower)
 
-    # Check conversation history
     if conversation_history:
         for msg in conversation_history:
             if msg.get("sender", "").lower() == "scammer":
-                msg_text = _get_msg_text(msg).lower()   # FIXED: checks both "text" and "message"
+                msg_text = _get_msg_text(msg).lower()
                 score += sum(0.5 for k in keywords if k in msg_text)
 
     return score >= 1.5
@@ -45,38 +44,44 @@ def detect_scam_type(text: str, conversation_history: List[Dict] = None) -> str:
     if conversation_history:
         for msg in conversation_history:
             if msg.get("sender", "").lower() == "scammer":
-                all_text += " " + _get_msg_text(msg).lower()   # FIXED
+                all_text += " " + _get_msg_text(msg).lower()
 
-    if "upi" in all_text or "@ok" in all_text or "@ybl" in all_text or "@paytm" in all_text or "cashback" in all_text:
-        return "UPI Fraud"
-    if "phish" in all_text or "click" in all_text or "http" in all_text or "link" in all_text:
-        return "Phishing"
-    if "bank" in all_text or "account" in all_text or "sbi" in all_text or "hdfc" in all_text:
-        return "Bank Impersonation"
-    if "won" in all_text or "prize" in all_text or "lottery" in all_text or "congratulations" in all_text:
-        return "Lottery Scam"
-    if "kyc" in all_text or "update" in all_text:
+    # ── Most specific / least ambiguous checks first ──────────────────────────
+    if "kyc" in all_text:
         return "KYC Scam"
-    if "otp" in all_text or "pin" in all_text or "password" in all_text:
-        return "Credential Theft"
-    if "refund" in all_text:
-        return "Refund Scam"
-    if "courier" in all_text or "parcel" in all_text or "delivery" in all_text or "customs" in all_text:
-        return "Courier Scam"
-    if "loan" in all_text or "credit" in all_text:
-        return "Loan Scam"
-    if "insurance" in all_text or "policy" in all_text:
-        return "Insurance Scam"
-    if "job" in all_text or "work from home" in all_text or "salary" in all_text:
-        return "Job Scam"
     if "income tax" in all_text or "it department" in all_text or "tax refund" in all_text:
         return "Tax Scam"
-    if "electricity" in all_text or "bill" in all_text or "disconnection" in all_text:
-        return "Utility Scam"
-    if "crypto" in all_text or "bitcoin" in all_text or "investment" in all_text:
-        return "Investment Scam"
+    if "courier" in all_text or "parcel" in all_text or "customs" in all_text:
+        return "Courier Scam"
+    if "won" in all_text or "prize" in all_text or "lottery" in all_text or "congratulations" in all_text:
+        return "Lottery Scam"
     if "tech support" in all_text or "virus" in all_text or "microsoft" in all_text:
         return "Tech Support Scam"
+    if "crypto" in all_text or "bitcoin" in all_text or "investment" in all_text:
+        return "Investment Scam"
+    if "insurance" in all_text or "policy" in all_text:
+        return "Insurance Scam"
+    if "job offer" in all_text or "work from home" in all_text or "part time job" in all_text or "salary" in all_text:
+        return "Job Scam"
+    if "electricity" in all_text or "disconnection" in all_text:
+        return "Utility Scam"
+    if "refund" in all_text:
+        return "Refund Scam"
+    if "loan" in all_text or "credit" in all_text:
+        return "Loan Scam"
+
+    # ── Bank impersonation before generic credential theft ────────────────────
+    # OTP/PIN requests are symptoms of bank impersonation when bank context exists
+    if "bank" in all_text or "sbi" in all_text or "hdfc" in all_text or "icici" in all_text or "account" in all_text:
+        return "Bank Impersonation"
+    if "otp" in all_text or "pin" in all_text or "password" in all_text or "cvv" in all_text:
+        return "Credential Theft"
+
+    # ── Broader checks last ───────────────────────────────────────────────────
+    if "upi" in all_text or "@ybl" in all_text or "@paytm" in all_text or "cashback" in all_text:
+        return "UPI Fraud"
+    if "phish" in all_text or ("click" in all_text and "http" in all_text):
+        return "Phishing"
 
     urgency_words = ["urgent", "immediately", "hurry", "quick", "now", "today"]
     payment_words = ["send", "pay", "transfer", "deposit", "rupee"]
@@ -89,33 +94,50 @@ def detect_scam_type(text: str, conversation_history: List[Dict] = None) -> str:
 def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> dict:
     """Extract all intelligence from message and conversation history"""
 
-    # Combine all scammer messages
     all_text = text
     if conversation_history:
         for msg in conversation_history:
             if msg.get("sender", "").lower() == "scammer":
-                all_text += " " + _get_msg_text(msg)   # FIXED
+                all_text += " " + _get_msg_text(msg)
 
     # ── UPI IDs ──────────────────────────────────────────────────────────────
-    # KEY RULE: UPI domains have NO dot (e.g. @fakebank, @paytm)
-    #           Emails have dots in domain (e.g. @fake-amazon.com)
+    #
+    # KEY RULE:
+    #   UPI IDs  → domain has NO dot    e.g. user@fakebank, name@paytm
+    #   Emails   → domain HAS a dot     e.g. user@fakebank.com, name@sbi.co.in
+    #
+    # ROOT-CAUSE FIX:
+    #   Old contextual patterns like `([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)` stopped
+    #   capturing at the first dot in the domain, so "user@fakebank.com" was
+    #   captured as "user@fakebank" — passing the "no dot" check and landing
+    #   wrongly in upiIds.
+    #
+    #   Fix: domain part of contextual patterns now uses `[a-zA-Z0-9\._-]+`
+    #   so the FULL address including dots is captured first. The dot-check
+    #   then correctly sends dotted domains to emailAddresses.
+
     upi_patterns = [
-        # Known UPI handles — always UPI
+        # Pattern 1: known UPI provider handles — always UPI (full match, no group)
         r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|okciti|okkotak|paytm|okhdfcbank|phonepe|gpay|googlepay|ybl|axl|icici|ibl|sbi|hdfc|fakebank|fakeupi|upi)\b',
-        # Contextual patterns — "send to X@Y", "pay to X@Y", "UPI ID: X@Y"
-        r'send\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-        r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-        r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-        r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+
+        # Patterns 2-5: contextual — domain now allows dots so full address is
+        # captured; the dot-check below filters email vs UPI correctly.
+        r'(?:send|email)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+        r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+        r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+        r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
     ]
+
     upi_ids = set()
     for pattern in upi_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             val = match[0] if isinstance(match, tuple) else match
             val = val.strip().lower()
-            domain = val.split('@')[1] if '@' in val else ''
-            # UPI domains have NO dot — if domain has a dot it's an email, not UPI
-            if '@' in val and '.' not in domain:
+            if '@' not in val:
+                continue
+            domain = val.split('@', 1)[1]
+            # UPI domains have NO dot; anything with a dot in the domain is an email
+            if '.' not in domain:
                 upi_ids.add(val)
 
     # ── Phone Numbers ─────────────────────────────────────────────────────────
@@ -130,9 +152,9 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             val = match[0] if isinstance(match, tuple) else match
             clean = re.sub(r'[^\d]', '', str(val))
-            if len(clean) == 10:
+            if len(clean) == 10 and clean[0] in '6789':
                 phone_numbers.add(f"+91{clean}")
-            elif len(clean) == 12 and clean.startswith('91'):
+            elif len(clean) == 12 and clean.startswith('91') and clean[2] in '6789':
                 phone_numbers.add(f"+{clean}")
 
     # ── Phishing Links ────────────────────────────────────────────────────────
@@ -141,7 +163,11 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
         r'www\.[^\s<>"\']+',
     ]
     phishing_links = set()
-    legit_domains = ['google', 'facebook', 'twitter', 'linkedin', 'youtube', 'wikipedia']
+    legit_domains = [
+        'google', 'facebook', 'twitter', 'linkedin', 'youtube', 'wikipedia',
+        'sbi.co.in', 'hdfcbank.com', 'icicibank.com', 'axisbank.com',
+        'rbi.org.in', 'incometax.gov.in', 'uidai.gov.in', 'npci.org.in'
+    ]
     for pattern in link_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             match = match.rstrip('.,)')
@@ -155,7 +181,6 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
         r'(?:bank|savings|current|ifsc)\s*(?:account|a/?c)\s*(?:is|:)?\s*(\d{9,18})',
     ]
     bank_accounts = set()
-    # Build phone digit set for dedup
     phone_digits = set()
     for p in phone_numbers:
         d = re.sub(r'\D', '', p)
@@ -170,12 +195,13 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
                     bank_accounts.add(clean)
 
     # ── Email Addresses ───────────────────────────────────────────────────────
+    # Require a dot in the domain (real emails) and exclude anything already
+    # captured as a UPI ID.
     email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
     raw_emails = set(re.findall(email_pattern, all_text, re.IGNORECASE))
-    # Keep only real emails (domain has a dot) and exclude UPI IDs already captured
     email_addresses = {
         e for e in raw_emails
-        if '.' in e.split('@')[1] and e.lower() not in upi_ids
+        if '.' in e.split('@', 1)[1] and e.lower() not in upi_ids
     }
 
     # ── Case / Reference IDs ──────────────────────────────────────────────────
@@ -226,7 +252,7 @@ def analyze_conversation_for_scam(conversation_history: List[Dict]) -> Dict:
         return empty
 
     scammer_messages = [
-        _get_msg_text(msg)                    # FIXED
+        _get_msg_text(msg)
         for msg in conversation_history
         if msg.get("sender", "").lower() == "scammer"
     ]
