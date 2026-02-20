@@ -1,4 +1,5 @@
 import json
+import random
 import re
 import requests
 from typing import Dict, List, Any, Optional
@@ -34,8 +35,19 @@ class AgenticHoneypot:
         self.gemini_api_key = gemini_api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
-        self.min_messages_before_end = 10
+        self.min_messages_before_end = 10   # FIX: raised from 8
         self.max_messages_per_session = 20
+
+        # Pool of fallback questions to avoid repeating the same line
+        self.fallback_questions = [
+            "Can you share your official company email and branch address?",
+            "What bank department exactly are you calling from?",
+            "Is there a supervisor I can speak to for verification?",
+            "Can you send me an official SMS from SBI number to confirm?",
+            "What is your staff ID and which branch are you calling from?",
+            "Can you tell me the exact name of your manager and department?",
+            "What is the official RBI helpline number I can cross-check with?",
+        ]
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -50,6 +62,13 @@ class AgenticHoneypot:
             role = "Scammer" if msg.get("sender") == "scammer" else "You"
             context.append(f"{role}: {self._get_msg_text(msg)}")
         return "\n".join(context)
+
+    def _get_last_agent_reply(self, session: Dict) -> str:
+        """Return the most recent agent message text"""
+        for msg in reversed(session.get("conversation_history", [])):
+            if msg.get("sender") == "agent":
+                return self._get_msg_text(msg).strip()
+        return ""
 
     def _should_end_conversation(self, session: Dict) -> bool:
         history = session.get("conversation_history", [])
@@ -68,11 +87,10 @@ class AgenticHoneypot:
         recent = [self._get_msg_text(m).lower() for m in scammer_messages[-3:]]
         sensitive = ["pin", "password", "otp", "aadhaar", "pan", "cvv"]
         if sum(1 for m in recent if any(k in m for k in sensitive)) >= 3:
-            # ✅ Add extra buffer — only if we also have enough messages
             if len(scammer_messages) >= 12:
                 return True
 
-        # ✅ Raise extraction threshold and require more messages
+        # Raise extraction threshold and require more messages
         extraction_score = self._calculate_extraction_score(session)
         if extraction_score > 0.85 and len(scammer_messages) >= 12:
             return True
@@ -112,11 +130,11 @@ Analyze and return ONLY valid JSON:
     "scammer_tactic": "brief description",
     "red_flags": ["list at least 3 red flags you observe in this conversation"],
     "key_elements": {{
-        "has_upi_id": true/false,
-        "has_urgency": true/false,
-        "requests_sensitive_info": true/false,
-        "requests_payment": true/false,
-        "has_contact_info": true/false
+        "has_upi_id": true,
+        "has_urgency": true,
+        "requests_sensitive_info": true,
+        "requests_payment": true,
+        "has_contact_info": true
     }},
     "victim_response_strategy": "how to respond to extract more intel",
     "specific_question_to_ask": "exact investigative question to ask",
@@ -142,12 +160,35 @@ Analyze and return ONLY valid JSON:
             if response.status_code == 200:
                 result = response.json()
                 if result.get("candidates"):
-                    text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                    match = re.search(r'\{.*\}', text, re.DOTALL)
+                    candidate = result["candidates"][0]
+
+                    # FIX: Check finish reason before parsing
+                    finish_reason = candidate.get("finishReason", "STOP")
+                    if finish_reason not in ("STOP", "stop"):
+                        print(f"⚠️ Gemini analysis cut off: {finish_reason}, using fallback")
+                        return self._fallback_analysis(message, session)
+
+                    raw = candidate["content"]["parts"][0]["text"].strip()
+
+                    # FIX: Strip markdown code fences if Gemini wraps in ```json
+                    raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
+                    raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE)
+                    raw = raw.strip()
+
+                    # FIX: Safe JSON extraction with proper error handling
+                    match = re.search(r'\{.*\}', raw, re.DOTALL)
                     if match:
-                        analysis = json.loads(match.group())
-                        print(f"✅ Gemini Analysis: stage={analysis.get('stage')} | {analysis.get('victim_response_strategy', '')[:60]}")
-                        return analysis
+                        try:
+                            analysis = json.loads(match.group())
+                            print(f"✅ Gemini Analysis: stage={analysis.get('stage')} | {analysis.get('victim_response_strategy', '')[:60]}")
+                            return analysis
+                        except json.JSONDecodeError as e:
+                            print(f"⚠️ JSON parse failed: {e} | raw: {raw[:200]}")
+                            return self._fallback_analysis(message, session)
+                    else:
+                        print(f"⚠️ No JSON found in Gemini response: {raw[:200]}")
+                        return self._fallback_analysis(message, session)
+
             print(f"⚠️ Gemini analysis returned {response.status_code}")
         except Exception as e:
             print(f"❌ Gemini analysis error: {e}")
@@ -170,7 +211,7 @@ Analyze and return ONLY valid JSON:
             else:
                 stage, question = "extracting", "What is your official website and helpline number I can verify with?"
         else:
-            stage, question = "deep_extraction", "Can you confirm the exact account number and your direct phone one more time?"
+            stage, question = "deep_extraction", "Can you give me your branch address and manager name to verify?"
 
         gaps = []
         if not artifacts.get("upi_ids"):       gaps.append("UPI ID needed")
@@ -214,9 +255,12 @@ Analyze and return ONLY valid JSON:
         stage = session.get("current_stage", ConversationStage.INITIAL)
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
 
+        # FIX: Track last reply to prevent repetition
+        last_reply = self._get_last_agent_reply(session)
+
         if self._should_end_conversation(session) and not session.get("ending_sent", False):
             ending_conversation = True
-            session["ending_sent"] = True  # Mark so next turn sees ended=True
+            session["ending_sent"] = True
 
         try:
             if ending_conversation:
@@ -227,17 +271,18 @@ CONVERSATION:
 
 SCAMMER'S LATEST MESSAGE: "{message}"
 
-Generate a short, natural excuse to leave (10-20 words, casual Indian English):
-Examples: "Phone battery dying will msg later", "Boss came be back in an hour", "Network issue talk later"
+Write a short natural excuse to leave. Must be a complete sentence, 10-15 words, casual Indian English.
+Examples: "Phone battery dying, will message you later", "My boss just called, speak later", "Network is very bad here, talk later"
 
-Your response:"""
+Your response (complete sentence only):"""
+
             else:
                 strategy = analysis.get("victim_response_strategy", "Ask for more details")
                 specific_question = analysis.get("specific_question_to_ask", "Can you explain more?")
                 gaps = analysis.get("intelligence_gaps", [])
                 red_flags = analysis.get("red_flags", [])
 
-                prompt = f"""You are playing the role of a victim in a scam conversation. Your goal is to keep the scammer talking and extract as much information as possible.
+                prompt = f"""You are playing the role of a confused, worried victim in a scam conversation. Your goal is to keep the scammer talking and extract as much information as possible.
 
 FULL CONVERSATION SO FAR:
 {context}
@@ -255,24 +300,26 @@ INTELLIGENCE ALREADY EXTRACTED:
 - Bank Accounts: {artifacts.get("bank_accounts", [])}
 
 STILL NEED: {", ".join(gaps) if gaps else "probe for more details"}
-
 RED FLAGS NOTICED: {", ".join(red_flags) if red_flags else "suspicious contact"}
 
 YOUR STRATEGY: {strategy}
-ASK THIS: {specific_question}
+ASK THIS SPECIFIC QUESTION: {specific_question}
+
+LAST THING YOU SAID: "{last_reply}"
 
 CRITICAL RULES:
-1. Never say "scam", "fraud", "suspicious", "fake" — stay in character as a worried victim
-2. Sound like a real Indian person — casual, simple English, slight anxiety
-3. Ask the suggested question above to extract missing intelligence
-4. Also ask ONE investigative question: company name / employee ID / official website / address
-5. Mention ONE red flag you noticed (e.g. "why is this so urgent?", "this seems unusual")
-6. Keep response to 20-35 words
-7. If payment/UPI mentioned — ask for EXACT UPI ID
-8. If calling mentioned — ask for EXACT phone number with employee ID
-9. If website mentioned — ask for EXACT URL
+1. NEVER repeat or closely paraphrase what you said last time
+2. Never say "scam", "fraud", "suspicious", "fake" — stay in character as a worried victim
+3. Sound like a real Indian person — casual, simple English, slight anxiety
+4. Ask the suggested question above to extract missing intelligence
+5. Also ask ONE investigative question about: company name / employee ID / official address
+6. Mention ONE red flag (e.g. "why is this so urgent?", "this seems very unusual")
+7. Your response MUST be a complete sentence, 20-35 words maximum
+8. Do NOT start a sentence you cannot finish
+9. If payment/UPI mentioned — ask for EXACT UPI ID
+10. If phone mentioned — ask for EXACT number with employee ID
 
-Your response (20-35 words, natural):"""
+Your response (complete sentence, 20-35 words):"""
 
             response = requests.post(
                 f"{self.base_url}?key={self.gemini_api_key}",
@@ -282,7 +329,7 @@ Your response (20-35 words, natural):"""
                     "generationConfig": {
                         "temperature": 0.85,
                         "top_p": 0.95,
-                        "maxOutputTokens": 200 
+                        "maxOutputTokens": 200   # FIX: prevents Gemini cutting off mid-sentence
                     }
                 },
                 timeout=15
@@ -291,8 +338,27 @@ Your response (20-35 words, natural):"""
             if response.status_code == 200:
                 result = response.json()
                 if result.get("candidates"):
-                    text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    candidate = result["candidates"][0]
+
+                    # FIX: Check finish reason — cut-off response is unusable
+                    finish_reason = candidate.get("finishReason", "STOP")
+                    if finish_reason not in ("STOP", "stop"):
+                        print(f"⚠️ Gemini reply cut off: {finish_reason}, using fallback")
+                        return self._get_non_repeating_fallback(last_reply, analysis)
+
+                    text = candidate["content"]["parts"][0]["text"].strip()
                     text = text.replace('"', '').replace("'", "").strip()
+
+                    # FIX: Guard against empty or suspiciously short replies
+                    if len(text) < 10:
+                        print(f"⚠️ Gemini reply too short: '{text}', using fallback")
+                        return self._get_non_repeating_fallback(last_reply, analysis)
+
+                    # FIX: Guard against repeating exact same reply
+                    if text.strip().lower() == last_reply.strip().lower():
+                        print(f"⚠️ Gemini repeated last reply, using fallback")
+                        return self._get_non_repeating_fallback(last_reply, analysis)
+
                     print(f"🤖 Response: {text}")
                     return text
 
@@ -300,7 +366,22 @@ Your response (20-35 words, natural):"""
         except Exception as e:
             print(f"❌ Response generation error: {e}")
 
-        return analysis.get("specific_question_to_ask", "Sorry can you please give me your employee ID and official phone number to verify?")
+        return self._get_non_repeating_fallback(last_reply, analysis)
+
+    def _get_non_repeating_fallback(self, last_reply: str, analysis: Dict) -> str:
+        """Return a fallback question that is different from the last reply"""
+        # Try the analysis suggested question first
+        suggested = analysis.get("specific_question_to_ask", "")
+        if suggested and suggested.strip().lower() != last_reply.strip().lower():
+            return suggested
+
+        # Pick a random fallback that doesn't match the last reply
+        options = [q for q in self.fallback_questions if q.strip().lower() != last_reply.strip().lower()]
+        if options:
+            return random.choice(options)
+
+        # Last resort
+        return "Can you please share your official company website and branch address for my records?"
 
     # ─── Intelligence Extraction ──────────────────────────────────────────────
 
@@ -317,34 +398,40 @@ Your response (20-35 words, natural):"""
             r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
             r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
             r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-            r'\b([a-zA-Z0-9\._-]+@[a-zA-Z0-9]{3,})\b',
+            r'\b([a-zA-Z0-9\._-]{4,}@[a-zA-Z0-9]{3,})\b',  # FIX: min 4 chars before @
         ]
         if "upi_ids" not in artifacts:
             artifacts["upi_ids"] = []
+        legit_email_domains = ['gmail', 'yahoo', 'hotmail', 'outlook', 'sbi.co', 'hdfcbank', 'icicibank']
         for pattern in upi_patterns:
             for match in re.finditer(pattern, message, re.IGNORECASE):
                 upi = match.group(1) if match.lastindex else match.group(0)
                 upi = upi.strip().lower()
-                if '@' in upi and not any(d in upi for d in ['gmail', 'yahoo', 'hotmail', 'outlook']):
+                if '@' in upi and not any(d in upi for d in legit_email_domains):
                     if upi not in artifacts["upi_ids"]:
                         artifacts["upi_ids"].append(upi)
                         print(f"🎯 UPI: {upi}")
 
-        # URLs
+        # URLs — only suspicious ones
         url_pattern = r'https?://[^\s<>"\']+|(?:www\.)[^\s<>"\']+'
+        legit_domains = [
+            'google', 'facebook', 'twitter', 'linkedin', 'youtube', 'wikipedia',
+            'sbi.co.in', 'hdfcbank.com', 'icicibank.com', 'axisbank.com',
+            'rbi.org.in', 'incometax.gov.in', 'uidai.gov.in', 'npci.org.in'
+        ]
         if "urls" not in artifacts:
             artifacts["urls"] = []
         for url in re.findall(url_pattern, message, re.IGNORECASE):
             url = url.rstrip('.,)')
-            if url not in artifacts["urls"]:
+            if not any(d in url.lower() for d in legit_domains) and url not in artifacts["urls"]:
                 artifacts["urls"].append(url)
                 print(f"🎯 URL: {url}")
 
-        # Phone numbers
+        # Phone numbers — FIX: use negative lookbehind to avoid matching inside long numbers
         phone_patterns = [
             r'\+91[-\s]?\d{10}',
-            r'\b91(\d{10})\b',
-            r'\b([6-9]\d{9})\b',
+            r'(?<!\d)91(\d{10})(?!\d)',
+            r'(?<!\d)([6-9]\d{9})(?!\d)',
             r'(?:call|contact|phone|mobile|reach)[:\s]+(\+?91[-\s]?\d{10}|\d{10})',
         ]
         if "phone_numbers" not in artifacts:
@@ -354,9 +441,9 @@ Your response (20-35 words, natural):"""
                 val = match[0] if isinstance(match, tuple) else match
                 clean = re.sub(r'[^\d]', '', str(val))
                 formatted = None
-                if len(clean) == 10:
+                if len(clean) == 10 and clean[0] in '6789':
                     formatted = f"+91{clean}"
-                elif len(clean) == 12 and clean.startswith('91'):
+                elif len(clean) == 12 and clean.startswith('91') and clean[2] in '6789':
                     formatted = f"+{clean}"
                 if formatted and formatted not in artifacts["phone_numbers"]:
                     artifacts["phone_numbers"].append(formatted)
@@ -374,8 +461,11 @@ Your response (20-35 words, natural):"""
             for match in re.findall(pattern, message, re.IGNORECASE):
                 clean = re.sub(r'\D', '', str(match))
                 if 9 <= len(clean) <= 18 and clean not in artifacts["bank_accounts"]:
-                    artifacts["bank_accounts"].append(clean)
-                    print(f"🎯 Bank Account: {clean}")
+                    # FIX: make sure it doesn't overlap with a known phone number
+                    is_phone = any(clean in re.sub(r'\D', '', p) for p in artifacts.get("phone_numbers", []))
+                    if not is_phone:
+                        artifacts["bank_accounts"].append(clean)
+                        print(f"🎯 Bank Account: {clean}")
 
         # Emails
         email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'

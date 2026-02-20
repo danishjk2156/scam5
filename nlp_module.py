@@ -108,21 +108,25 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
         r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
         r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
         r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-        r'\b([a-zA-Z0-9\._-]+@[a-zA-Z0-9]{3,})\b',
+        r'\b([a-zA-Z0-9\._-]{4,}@[a-zA-Z0-9]{3,})\b',  # FIX: min 4 chars before @
     ]
     upi_ids = set()
     for pattern in upi_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             val = match[0] if isinstance(match, tuple) else match
             val = val.strip().lower()
-            if '@' in val and not any(d in val for d in ['gmail', 'yahoo', 'hotmail', 'outlook']):
+            if '@' in val and not any(d in val for d in ['gmail', 'yahoo', 'hotmail', 'outlook', 'sbi.co', 'hdfcbank', 'icicibank']):
                 upi_ids.add(val)
 
+    # FIX: filter out UPI IDs that are too short before the @ (likely false positives)
+    upi_ids = {u for u in upi_ids if len(u.split('@')[0]) >= 4}
+
     # ── Phone Numbers ─────────────────────────────────────────────────────────
+    # FIX: use negative lookbehind/lookahead to avoid matching numbers inside longer digit strings
     phone_patterns = [
         r'\+91[-\s]?\d{10}',
-        r'\b91\d{10}\b',
-        r'\b[6-9]\d{9}\b',
+        r'(?<!\d)91(\d{10})(?!\d)',
+        r'(?<!\d)([6-9]\d{9})(?!\d)',
         r'(?:call|contact|phone|mobile|number|reach)[:\s]+(\+?91[-\s]?\d{10}|\d{10})',
     ]
     phone_numbers = set()
@@ -130,9 +134,9 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             val = match[0] if isinstance(match, tuple) else match
             clean = re.sub(r'[^\d]', '', str(val))
-            if len(clean) == 10:
+            if len(clean) == 10 and clean[0] in '6789':
                 phone_numbers.add(f"+91{clean}")
-            elif len(clean) == 12 and clean.startswith('91'):
+            elif len(clean) == 12 and clean.startswith('91') and clean[2] in '6789':
                 phone_numbers.add(f"+{clean}")
 
     # ── Phishing Links ────────────────────────────────────────────────────────
@@ -141,7 +145,12 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
         r'www\.[^\s<>"\']+',
     ]
     phishing_links = set()
-    legit_domains = ['google', 'facebook', 'twitter', 'linkedin', 'youtube', 'wikipedia']
+    # FIX: expanded legit domains to include major Indian bank/govt sites
+    legit_domains = [
+        'google', 'facebook', 'twitter', 'linkedin', 'youtube', 'wikipedia',
+        'sbi.co.in', 'hdfcbank.com', 'icicibank.com', 'axisbank.com',
+        'rbi.org.in', 'incometax.gov.in', 'uidai.gov.in', 'npci.org.in'
+    ]
     for pattern in link_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             match = match.rstrip('.,)')
@@ -149,6 +158,7 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
                 phishing_links.add(match)
 
     # ── Bank Accounts ─────────────────────────────────────────────────────────
+    # FIX: removed bare digit pattern — only extract with contextual keywords
     bank_patterns = [
         r'account\s*(?:number|no\.?|#)[:\s]+(\d{9,18})',
         r'a/?c\s*(?:number|no\.?|#)?[:\s]+(\d{9,18})',
@@ -158,8 +168,11 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
     for pattern in bank_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             clean = re.sub(r'\D', '', str(match))
-            if 9 <= len(clean) <= 18 and not any(clean == re.sub(r'\D', '', p) for p in phone_numbers):
-                bank_accounts.add(clean)
+            if 9 <= len(clean) <= 18:
+                # FIX: ensure it's not already captured as a phone number
+                is_phone = any(clean in re.sub(r'\D', '', p) for p in phone_numbers)
+                if not is_phone:
+                    bank_accounts.add(clean)
 
     # ── Email Addresses ───────────────────────────────────────────────────────
     email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
@@ -171,12 +184,15 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
 
     # ── Case / Reference IDs ──────────────────────────────────────────────────
     case_id_patterns = [
-        r'(?:case|ticket|ref(?:erence)?|complaint|order|policy|SR|CR)\s*(?:id|no\.?|#)?[:\s]+([A-Z0-9\-]{4,20})',
+        r'(?:case|ticket|ref(?:erence)?|complaint|order|policy|SR|CR)\s*(?:id|no\.?|#)?[:\s]+([A-Z0-9][A-Z0-9\-]{4,19})',
     ]
     case_ids = set()
     for pattern in case_id_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
-            case_ids.add(match.strip())
+            stripped = match.strip()
+            # FIX: must contain at least one digit to be a real ID, not just a word
+            if re.search(r'\d', stripped):
+                case_ids.add(stripped)
 
     # ── Suspicious Keywords ───────────────────────────────────────────────────
     keyword_list = [
