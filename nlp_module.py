@@ -28,11 +28,10 @@ def detect_scam_intent(text: str, conversation_history: List[Dict] = None) -> bo
     text_lower = text.lower()
     score = sum(1 for k in keywords if k in text_lower)
 
-    # Check conversation history
     if conversation_history:
         for msg in conversation_history:
             if msg.get("sender", "").lower() == "scammer":
-                msg_text = _get_msg_text(msg).lower()   # FIXED: checks both "text" and "message"
+                msg_text = _get_msg_text(msg).lower()
                 score += sum(0.5 for k in keywords if k in msg_text)
 
     return score >= 1.5
@@ -45,38 +44,45 @@ def detect_scam_type(text: str, conversation_history: List[Dict] = None) -> str:
     if conversation_history:
         for msg in conversation_history:
             if msg.get("sender", "").lower() == "scammer":
-                all_text += " " + _get_msg_text(msg).lower()   # FIXED
+                all_text += " " + _get_msg_text(msg).lower()
 
-    if "upi" in all_text or "@ok" in all_text or "@ybl" in all_text or "@paytm" in all_text or "cashback" in all_text:
-        return "UPI Fraud"
-    if "phish" in all_text or "click" in all_text or "http" in all_text or "link" in all_text:
-        return "Phishing"
-    if "bank" in all_text or "account" in all_text or "sbi" in all_text or "hdfc" in all_text:
-        return "Bank Impersonation"
+    # ── Most specific checks first ────────────────────────────────────────────
+
+    if "kyc" in all_text:
+        return "KYC Scam"
+    if "income tax" in all_text or "it department" in all_text or "tax refund" in all_text:
+        return "Tax Scam"
+    if "courier" in all_text or "parcel" in all_text or "customs" in all_text:
+        return "Courier Scam"
     if "won" in all_text or "prize" in all_text or "lottery" in all_text or "congratulations" in all_text:
         return "Lottery Scam"
-    if "kyc" in all_text or "update" in all_text:
-        return "KYC Scam"
-    if "otp" in all_text or "pin" in all_text or "password" in all_text:
-        return "Credential Theft"
-    if "refund" in all_text:
-        return "Refund Scam"
-    if "courier" in all_text or "parcel" in all_text or "delivery" in all_text or "customs" in all_text:
-        return "Courier Scam"
-    if "loan" in all_text or "credit" in all_text:
-        return "Loan Scam"
+    if "tech support" in all_text or "virus" in all_text or "microsoft" in all_text:
+        return "Tech Support Scam"
+    if "crypto" in all_text or "bitcoin" in all_text or "investment" in all_text:
+        return "Investment Scam"
     if "insurance" in all_text or "policy" in all_text:
         return "Insurance Scam"
     if "job" in all_text or "work from home" in all_text or "salary" in all_text:
         return "Job Scam"
-    if "income tax" in all_text or "it department" in all_text or "tax refund" in all_text:
-        return "Tax Scam"
-    if "electricity" in all_text or "bill" in all_text or "disconnection" in all_text:
+    if "electricity" in all_text or "disconnection" in all_text:
         return "Utility Scam"
-    if "crypto" in all_text or "bitcoin" in all_text or "investment" in all_text:
-        return "Investment Scam"
-    if "tech support" in all_text or "virus" in all_text or "microsoft" in all_text:
-        return "Tech Support Scam"
+    if "refund" in all_text:
+        return "Refund Scam"
+    if "loan" in all_text or "credit" in all_text:
+        return "Loan Scam"
+    if "otp" in all_text or "pin" in all_text or "password" in all_text or "cvv" in all_text:
+        return "Credential Theft"
+
+    # ── Broader checks last (these keywords appear in too many scam types) ────
+
+    if "upi" in all_text or "@ybl" in all_text or "@paytm" in all_text or "cashback" in all_text:
+        return "UPI Fraud"
+    if "phish" in all_text or ("click" in all_text and "http" in all_text):
+        return "Phishing"
+    if "bank" in all_text or "sbi" in all_text or "hdfc" in all_text or "account" in all_text:
+        return "Bank Impersonation"
+
+    # ── Generic fallback ──────────────────────────────────────────────────────
 
     urgency_words = ["urgent", "immediately", "hurry", "quick", "now", "today"]
     payment_words = ["send", "pay", "transfer", "deposit", "rupee"]
@@ -89,12 +95,11 @@ def detect_scam_type(text: str, conversation_history: List[Dict] = None) -> str:
 def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> dict:
     """Extract all intelligence from message and conversation history"""
 
-    # Combine all scammer messages
     all_text = text
     if conversation_history:
         for msg in conversation_history:
             if msg.get("sender", "").lower() == "scammer":
-                all_text += " " + _get_msg_text(msg)   # FIXED
+                all_text += " " + _get_msg_text(msg)
 
     # ── UPI IDs ──────────────────────────────────────────────────────────────
     upi_patterns = [
@@ -103,14 +108,13 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
         r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
         r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
         r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-        r'\b([a-zA-Z0-9\._-]+@[a-zA-Z0-9]{3,})\b',   # generic catch-all
+        r'\b([a-zA-Z0-9\._-]+@[a-zA-Z0-9]{3,})\b',
     ]
     upi_ids = set()
     for pattern in upi_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             val = match[0] if isinstance(match, tuple) else match
             val = val.strip().lower()
-            # Keep only if it looks like UPI (has @) and is not a plain email domain
             if '@' in val and not any(d in val for d in ['gmail', 'yahoo', 'hotmail', 'outlook']):
                 upi_ids.add(val)
 
@@ -148,20 +152,18 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
     bank_patterns = [
         r'account\s*(?:number|no\.?|#)[:\s]+(\d{9,18})',
         r'a/?c\s*(?:number|no\.?|#)?[:\s]+(\d{9,18})',
-        r'\b(\d{9,18})\b',
+        r'(?:bank|savings|current|ifsc)\s*(?:account|a/?c)[:\s]*(\d{9,18})',
     ]
     bank_accounts = set()
     for pattern in bank_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             clean = re.sub(r'\D', '', str(match))
-            # Must be 9-18 digits and NOT a phone number
-            if 9 <= len(clean) <= 18 and not any(clean == re.sub(r'\D','',p) for p in phone_numbers):
+            if 9 <= len(clean) <= 18 and not any(clean == re.sub(r'\D', '', p) for p in phone_numbers):
                 bank_accounts.add(clean)
 
     # ── Email Addresses ───────────────────────────────────────────────────────
     email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
     raw_emails = set(re.findall(email_pattern, all_text, re.IGNORECASE))
-    # Keep only real emails (domain has a dot) and exclude UPI IDs already captured
     email_addresses = {
         e for e in raw_emails
         if '.' in e.split('@')[1] and e.lower() not in upi_ids
@@ -211,7 +213,7 @@ def analyze_conversation_for_scam(conversation_history: List[Dict]) -> Dict:
         return empty
 
     scammer_messages = [
-        _get_msg_text(msg)                    # FIXED
+        _get_msg_text(msg)
         for msg in conversation_history
         if msg.get("sender", "").lower() == "scammer"
     ]

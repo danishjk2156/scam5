@@ -34,7 +34,7 @@ class AgenticHoneypot:
         self.gemini_api_key = gemini_api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         self.sessions: Dict[str, Any] = {}
-        self.min_messages_before_end = 8    # CHANGED from 5 → forces 8+ turns for max score
+        self.min_messages_before_end = 10
         self.max_messages_per_session = 20
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
@@ -52,27 +52,29 @@ class AgenticHoneypot:
         return "\n".join(context)
 
     def _should_end_conversation(self, session: Dict) -> bool:
-        """Only end after 8+ scammer messages to maximise turn count score"""
         history = session.get("conversation_history", [])
         scammer_messages = [m for m in history if m.get("sender") == "scammer"]
 
-        # Never end before minimum
+        # Hard minimum — never end before this
         if len(scammer_messages) < self.min_messages_before_end:
             return False
 
-        # Always end at max
+        # Hard maximum
         if len(history) >= self.max_messages_per_session:
             return True
 
-        # End if scammer is getting very aggressive (3 sensitive requests in last 3 msgs)
+        # Only end if scammer has been VERY aggressively pushing credentials
+        # across ALL recent messages, not just any mention
         recent = [self._get_msg_text(m).lower() for m in scammer_messages[-3:]]
         sensitive = ["pin", "password", "otp", "aadhaar", "pan", "cvv"]
         if sum(1 for m in recent if any(k in m for k in sensitive)) >= 3:
-            return True
+            # ✅ Add extra buffer — only if we also have enough messages
+            if len(scammer_messages) >= 12:
+                return True
 
-        # End if we have good extraction AND enough turns
+        # ✅ Raise extraction threshold and require more messages
         extraction_score = self._calculate_extraction_score(session)
-        if extraction_score > 0.7 and len(scammer_messages) >= 8:
+        if extraction_score > 0.85 and len(scammer_messages) >= 12:
             return True
 
         return False
@@ -171,10 +173,10 @@ Analyze and return ONLY valid JSON:
             stage, question = "deep_extraction", "Can you confirm the exact account number and your direct phone one more time?"
 
         gaps = []
-        if not artifacts.get("upi_ids"):    gaps.append("UPI ID needed")
-        if not artifacts.get("phone_numbers"): gaps.append("Phone number needed")
-        if not artifacts.get("urls"):       gaps.append("Website URL needed")
-        if not artifacts.get("bank_accounts"): gaps.append("Bank account number needed")
+        if not artifacts.get("upi_ids"):       gaps.append("UPI ID needed")
+        if not artifacts.get("phone_numbers"):  gaps.append("Phone number needed")
+        if not artifacts.get("urls"):           gaps.append("Website URL needed")
+        if not artifacts.get("bank_accounts"):  gaps.append("Bank account number needed")
 
         red_flags = []
         if any(w in msg_lower for w in ["urgent", "immediately", "block"]): red_flags.append("urgency pressure tactics")
@@ -206,7 +208,6 @@ Analyze and return ONLY valid JSON:
     def _generate_contextual_response(self, message: str, session: Dict, analysis: Dict, ending_conversation: bool = False) -> str:
         """Generate honeypot response using Gemini"""
 
-        # Always extract intelligence from this message first
         self._update_extracted_intelligence(session, message)
 
         context = self._get_conversation_context(session)
@@ -215,7 +216,7 @@ Analyze and return ONLY valid JSON:
 
         if self._should_end_conversation(session) and not session.get("ending_sent", False):
             ending_conversation = True
-            session["ending_sent"] = True
+            session["ending_sent"] = True  # Mark so next turn sees ended=True
 
         try:
             if ending_conversation:
@@ -281,7 +282,7 @@ Your response (20-35 words, natural):"""
                     "generationConfig": {
                         "temperature": 0.85,
                         "top_p": 0.95,
-                        "max_output_tokens": 120
+                        "maxOutputTokens": 200 
                     }
                 },
                 timeout=15
@@ -316,7 +317,7 @@ Your response (20-35 words, natural):"""
             r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
             r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
             r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-            r'\b([a-zA-Z0-9\._-]+@[a-zA-Z0-9]{3,})\b',   # generic catch-all
+            r'\b([a-zA-Z0-9\._-]+@[a-zA-Z0-9]{3,})\b',
         ]
         if "upi_ids" not in artifacts:
             artifacts["upi_ids"] = []
@@ -324,7 +325,7 @@ Your response (20-35 words, natural):"""
             for match in re.finditer(pattern, message, re.IGNORECASE):
                 upi = match.group(1) if match.lastindex else match.group(0)
                 upi = upi.strip().lower()
-                if '@' in upi and not any(d in upi for d in ['gmail','yahoo','hotmail','outlook']):
+                if '@' in upi and not any(d in upi for d in ['gmail', 'yahoo', 'hotmail', 'outlook']):
                     if upi not in artifacts["upi_ids"]:
                         artifacts["upi_ids"].append(upi)
                         print(f"🎯 UPI: {upi}")
@@ -361,10 +362,11 @@ Your response (20-35 words, natural):"""
                     artifacts["phone_numbers"].append(formatted)
                     print(f"🎯 Phone: {formatted}")
 
-        # Bank accounts
+        # Bank accounts — require contextual keywords to avoid false positives
         bank_patterns = [
             r'account\s*(?:number|no\.?|#)[:\s]+(\d{9,18})',
             r'a/?c\s*(?:no\.?|#)?[:\s]+(\d{9,18})',
+            r'(?:bank|savings|current)\s*(?:account|a/?c)[:\s]*(\d{9,18})',
         ]
         if "bank_accounts" not in artifacts:
             artifacts["bank_accounts"] = []
@@ -450,7 +452,6 @@ Your response (20-35 words, natural):"""
 
             session = self.sessions[session_id]
 
-            # Add scammer message to history
             session["conversation_history"].append({
                 "timestamp": datetime.now().isoformat(),
                 "sender": "scammer",
@@ -458,7 +459,6 @@ Your response (20-35 words, natural):"""
             })
             print(f"\n📱 SCAMMER [{session_id[:8]}]: {message}")
 
-            # Analyse and generate response
             analysis = self._analyze_message_with_gemini(message, session)
             session["scam_analysis"].append({"timestamp": datetime.now().isoformat(), "analysis": analysis})
 
@@ -468,7 +468,6 @@ Your response (20-35 words, natural):"""
             should_end = self._should_end_conversation(session)
             agent_response = self._generate_contextual_response(message, session, analysis, should_end)
 
-            # Add agent response to history
             session["conversation_history"].append({
                 "timestamp": datetime.now().isoformat(),
                 "sender": "agent",

@@ -186,7 +186,8 @@ class SupabaseService:
         phone_numbers: List[str] = None,
         bank_accounts: List[str] = None,
         phishing_links: List[str] = None,
-        suspicious_keywords: List[str] = None
+        suspicious_keywords: List[str] = None,
+        email_addresses: List[str] = None
     ) -> Optional[Dict]:
         """Save or update extracted intelligence"""
         try:
@@ -202,7 +203,8 @@ class SupabaseService:
                 "phone_numbers": phone_numbers or [],
                 "bank_accounts": bank_accounts or [],
                 "phishing_links": phishing_links or [],
-                "suspicious_keywords": suspicious_keywords or []
+                "suspicious_keywords": suspicious_keywords or [],
+                "email_addresses": email_addresses or []
             }
             
             if existing.data:
@@ -275,12 +277,23 @@ class SupabaseService:
             }
             if api_response:
                 updates["external_api_response"] = api_response
-            
-            result = supabase.table("scam_reports")\
-                .update(updates)\
+
+            # FIX: Cannot chain .order().limit() after .update() in Supabase client.
+            # First fetch the latest report id, then update it.
+            latest = supabase.table("scam_reports")\
+                .select("id")\
                 .eq("session_id", session_id)\
                 .order("report_generated_at", desc=True)\
                 .limit(1)\
+                .execute()
+
+            if not latest.data:
+                return None
+
+            report_id = latest.data[0]["id"]
+            result = supabase.table("scam_reports")\
+                .update(updates)\
+                .eq("id", report_id)\
                 .execute()
             return result.data[0] if result.data else None
         except Exception as e:
