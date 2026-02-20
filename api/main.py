@@ -213,18 +213,18 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
             "extracted_intelligence": {"artifacts": {}},
             "scam_type": scam_type,          # NLP result stored at init
             "scam_analysis": [],
-            "ending_sent": False,
             "ended": False
         }
     else:
+        # FIX #1: Replace conversation_history with the authoritative DB copy.
+        # The agent no longer appends the scammer message (that was the dup bug),
+        # but it DOES append its own agent reply for the repetition guard.
+        # So we set it to the DB copy (which includes scammer + user messages)
+        # and let process_message append only the new agent reply.
         honeypot.sessions[session_id]["conversation_history"] = full_conversation
-        # FIX: always keep scam_type in sync with the latest NLP result so
-        # generate_agent_notes can fall back to it when scam_analysis is empty.
         honeypot.sessions[session_id]["scam_type"] = scam_type
         if "scam_analysis" not in honeypot.sessions[session_id]:
             honeypot.sessions[session_id]["scam_analysis"] = []
-        if "ending_sent" not in honeypot.sessions[session_id]:
-            honeypot.sessions[session_id]["ending_sent"] = False
 
     # ---------- Agent processing ----------
     agent_result = honeypot.process_message({
@@ -258,7 +258,7 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
     all_phones = list(set(intelligence.get("phoneNumbers", []) + artifacts.get("phone_numbers", [])))
     all_links = list(set(intelligence.get("phishingLinks", []) + artifacts.get("urls", [])))
     all_banks = list(set(intelligence.get("bankAccounts", []) + artifacts.get("bank_accounts", [])))
-    all_emails = list(set(intelligence.get("emailAddresses", []) + artifacts.get("email_addresses", [])))
+    all_emails = list(set(intelligence.get("emailAddresses", []) + artifacts.get("emails", []) + artifacts.get("email_addresses", [])))
     all_case_ids = list(set(intelligence.get("caseIds", []) + artifacts.get("case_ids", [])))
     all_keywords = list(set(intelligence.get("suspiciousKeywords", [])))
 
@@ -376,31 +376,34 @@ def generate_agent_notes(session: Dict) -> str:
     if not session:
         return "Session data not available"
 
+    def _msg_text(msg):
+        return msg.get("text") or msg.get("message") or ""
+
     notes = []
     history = session.get("conversation_history", [])
     scammer_messages = [msg for msg in history if msg.get("sender", "").lower() == "scammer"]
 
     urgency_keywords = ["urgent", "immediately", "now", "quickly", "hurry", "last chance"]
     urgency_count = sum(1 for msg in scammer_messages
-                        if any(kw in msg.get("message", "").lower() for kw in urgency_keywords))
+                        if any(kw in _msg_text(msg).lower() for kw in urgency_keywords))
     if urgency_count > 0:
         notes.append(f"Used urgency tactics in {urgency_count} messages (red flag: pressure tactics)")
 
     threat_keywords = ["blocked", "suspended", "legal action", "police", "arrest"]
     threat_count = sum(1 for msg in scammer_messages
-                       if any(kw in msg.get("message", "").lower() for kw in threat_keywords))
+                       if any(kw in _msg_text(msg).lower() for kw in threat_keywords))
     if threat_count > 0:
         notes.append(f"Made threats in {threat_count} messages (red flag: intimidation)")
 
     payment_keywords = ["send", "pay", "transfer", "deposit"]
     payment_count = sum(1 for msg in scammer_messages
-                        if any(kw in msg.get("message", "").lower() for kw in payment_keywords))
+                        if any(kw in _msg_text(msg).lower() for kw in payment_keywords))
     if payment_count > 0:
         notes.append(f"Requested payment {payment_count} times (red flag: unexpected payment request)")
 
     otp_keywords = ["otp", "pin", "password", "cvv"]
     otp_count = sum(1 for msg in scammer_messages
-                    if any(kw in msg.get("message", "").lower() for kw in otp_keywords))
+                    if any(kw in _msg_text(msg).lower() for kw in otp_keywords))
     if otp_count > 0:
         notes.append(f"Requested OTP/PIN/password {otp_count} times (red flag: credential theft attempt)")
 
@@ -413,8 +416,10 @@ def generate_agent_notes(session: Dict) -> str:
         notes.append(f"Sent {len(artifacts['urls'])} suspicious link(s)")
     if artifacts.get("bank_accounts"):
         notes.append(f"Revealed {len(artifacts['bank_accounts'])} bank account number(s)")
-    if artifacts.get("email_addresses"):
-        notes.append(f"Shared email address(es): {', '.join(artifacts['email_addresses'])}")
+    if artifacts.get("emails"):
+        notes.append(f"Shared email address(es): {', '.join(artifacts['emails'])}")
+    if artifacts.get("case_ids"):
+        notes.append(f"Provided case/reference ID(s): {', '.join(artifacts['case_ids'])}")
 
     # FIX: was reading only from scam_analysis (often empty) and falling through to "Unknown".
     # Now: try scam_analysis first (richer agent data), then fall back to the NLP-derived

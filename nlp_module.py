@@ -150,17 +150,24 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
 
     # ── Bank Accounts ─────────────────────────────────────────────────────────
     bank_patterns = [
-        r'account\s*(?:number|no\.?|#)[:\s]+(\d{9,18})',
-        r'a/?c\s*(?:number|no\.?|#)?[:\s]+(\d{9,18})',
-        r'\b(\d{9,18})\b',
+        r'account\s*(?:number|no\.?|#)?\s*(?:is|:)?\s*(\d{9,18})',
+        r'a/?c\s*(?:number|no\.?|#)?\s*(?:is|:)?\s*(\d{9,18})',
+        r'(?:bank|savings|current|ifsc)\s*(?:account|a/?c)\s*(?:is|:)?\s*(\d{9,18})',
     ]
     bank_accounts = set()
+    # Build phone digit set for dedup
+    phone_digits = set()
+    for p in phone_numbers:
+        d = re.sub(r'\D', '', p)
+        phone_digits.add(d)
+        if len(d) >= 10:
+            phone_digits.add(d[-10:])
     for pattern in bank_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
             clean = re.sub(r'\D', '', str(match))
-            # Must be 9-18 digits and NOT a phone number
-            if 9 <= len(clean) <= 18 and not any(clean == re.sub(r'\D','',p) for p in phone_numbers):
-                bank_accounts.add(clean)
+            if 9 <= len(clean) <= 18:
+                if clean not in phone_digits and clean[-10:] not in phone_digits:
+                    bank_accounts.add(clean)
 
     # ── Email Addresses ───────────────────────────────────────────────────────
     email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
@@ -173,12 +180,16 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
 
     # ── Case / Reference IDs ──────────────────────────────────────────────────
     case_id_patterns = [
-        r'(?:case|ticket|ref(?:erence)?|complaint|order|policy|SR|CR)\s*(?:id|no\.?|#)?[:\s]+([A-Z0-9\-]{4,20})',
+        r'(?:case|ticket|ref(?:erence)?|complaint|order|policy|SR|CR)\s*(?:id|number|no\.?|#)?[:\s]+([A-Z0-9][A-Z0-9\-]{3,19})',
+        r'(?:case|ticket|ref(?:erence)?|complaint|order|policy)\s*(?:id|number|no\.?|#)\s*(?:is|:)\s*([A-Z0-9][A-Z0-9\-]{3,19})',
+        r'(?:staff|employee|badge)\s*(?:id|number|no\.?|#)?[:\s]+([A-Z0-9][A-Z0-9\-]{2,19})',
     ]
     case_ids = set()
     for pattern in case_id_patterns:
         for match in re.findall(pattern, all_text, re.IGNORECASE):
-            case_ids.add(match.strip())
+            stripped = match.strip()
+            if re.search(r'\d', stripped):
+                case_ids.add(stripped)
 
     # ── Suspicious Keywords ───────────────────────────────────────────────────
     keyword_list = [
