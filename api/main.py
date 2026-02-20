@@ -251,8 +251,8 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
     # ---------- Merge intelligence from both NLP and agent artifacts ----------
     artifacts = honeypot.sessions[session_id].get("extracted_intelligence", {}).get("artifacts", {})
 
+    # Merge all sources, deduplicate, and format phone numbers with dash
     def fmt_phone(p: str) -> str:
-        """Reformat +91XXXXXXXXXX → +91-XXXXXXXXXX"""
         clean = re.sub(r'[^\d]', '', p)
         if len(clean) == 12 and clean.startswith('91'):
             return f"+91-{clean[2:]}"
@@ -260,7 +260,6 @@ def receive_message(payload: HoneypotRequest, x_api_key: str = Header(None)):
             return f"+91-{clean}"
         return p
 
-    # Merge all sources, deduplicate, format phones
     raw_phones = list(set(intelligence.get("phoneNumbers", []) + artifacts.get("phone_numbers", [])))
     all_phones = [fmt_phone(p) for p in raw_phones]
     all_upi = list(set(intelligence.get("upiIds", []) + artifacts.get("upi_ids", [])))
@@ -412,7 +411,16 @@ def generate_agent_notes(session: Dict) -> str:
     if artifacts.get("upi_ids"):
         notes.append(f"Provided {len(artifacts['upi_ids'])} UPI ID(s): {', '.join(artifacts['upi_ids'])}")
     if artifacts.get("phone_numbers"):
-        notes.append(f"Shared {len(artifacts['phone_numbers'])} phone number(s): {', '.join(artifacts['phone_numbers'])}")
+        fmt_phones = []
+        for p in artifacts["phone_numbers"]:
+            clean = re.sub(r'[^\d]', '', p)
+            if len(clean) == 12 and clean.startswith('91'):
+                fmt_phones.append(f"+91-{clean[2:]}")
+            elif len(clean) == 10:
+                fmt_phones.append(f"+91-{clean}")
+            else:
+                fmt_phones.append(p)
+        notes.append(f"Shared {len(fmt_phones)} phone number(s): {', '.join(fmt_phones)}")
     if artifacts.get("urls"):
         notes.append(f"Sent {len(artifacts['urls'])} suspicious link(s)")
     if artifacts.get("bank_accounts"):

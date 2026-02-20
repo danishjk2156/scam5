@@ -422,13 +422,15 @@ Your response (complete, different from recent replies, 20-40 words):"""
         """Extract intelligence from a single text string into artifacts dict.
         Separated out so it can be called on individual messages OR full history."""
 
-        # UPI IDs — domain has NO dot (emails have dots)
+        # UPI IDs — domain has NO dot (emails have dots in domain)
+        # FIX: contextual patterns now capture full address including dots,
+        # so the dot-check correctly routes emails to emailAddresses instead.
         upi_patterns = [
             r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|paytm|phonepe|gpay|ybl|axl|fakebank|fakeupi|upi)\b',
-            r'send\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-            r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-            r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
-            r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)',
+            r'(?:send|email)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+            r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+            r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+            r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
         ]
         if "upi_ids" not in artifacts:
             artifacts["upi_ids"] = []
@@ -512,6 +514,8 @@ Your response (complete, different from recent replies, 20-40 words):"""
                 print(f"🎯 Email: {email}")
 
         # Case / Reference / Staff IDs
+        # FIX: exclude pure digit strings (those are bank accounts or phone numbers)
+        # A real case ID must contain at least one letter OR a dash between segments.
         case_patterns = [
             r'(?:case|ticket|ref(?:erence)?|complaint|order|policy)\s*(?:id|number|no\.?|#)?[:\s]+([A-Z0-9][A-Z0-9\-]{3,19})',
             r'(?:case|ticket|ref(?:erence)?|complaint|order|policy)\s*(?:id|number|no\.?|#)\s*(?:is|:)\s*([A-Z0-9][A-Z0-9\-]{3,19})',
@@ -519,9 +523,23 @@ Your response (complete, different from recent replies, 20-40 words):"""
         ]
         if "case_ids" not in artifacts:
             artifacts["case_ids"] = []
+        bank_acct_set = set(artifacts.get("bank_accounts", []))
+        phone_digit_set = set(re.sub(r'\D', '', p) for p in artifacts.get("phone_numbers", []))
         for pattern in case_patterns:
             for match in re.findall(pattern, text, re.IGNORECASE):
                 stripped = match.strip()
+                digits_only = re.sub(r'\D', '', stripped)
+                # Skip if it's a pure number (bank account or phone)
+                if stripped.isdigit():
+                    continue
+                # Skip if digits match a known bank account or phone
+                if digits_only in bank_acct_set or digits_only in phone_digit_set:
+                    continue
+                # Must contain at least one letter OR have a dash (real ref IDs like 2023-4567)
+                has_letter = bool(re.search(r'[A-Za-z]', stripped))
+                has_dash = '-' in stripped
+                if not has_letter and not has_dash:
+                    continue
                 if re.search(r'\d', stripped) and stripped not in artifacts["case_ids"]:
                     artifacts["case_ids"].append(stripped)
                     print(f"🎯 Case/Ref ID: {stripped}")
