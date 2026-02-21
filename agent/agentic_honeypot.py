@@ -1,3 +1,15 @@
+"""
+Agentic Honeypot — v4.0
+
+Key improvements over v3:
+  - Scam-type-aware investigative questions (not just generic)
+  - Richer red-flag identification surfaced in responses
+  - Better Gemini prompts that reference specific red flags
+  - Improved information elicitation strategies per scam type
+  - Policy/order number extraction
+  - More diverse dynamic question templates
+"""
+
 import json
 import random
 import re
@@ -19,6 +31,11 @@ class ScamType(Enum):
     CREDIT_CARD = "Credit Card Fraud"
     SIM_CARD = "SIM Card Scam"
     COURIER = "Courier Scam"
+    BANK_IMPERSONATION = "Bank Impersonation"
+    KYC_SCAM = "KYC Scam"
+    INSURANCE_SCAM = "Insurance Scam"
+    TAX_SCAM = "Tax Scam"
+    JOB_SCAM = "Job Scam"
     UNKNOWN = "Unknown"
 
 
@@ -31,8 +48,12 @@ class ConversationStage(Enum):
     ENDED = "ended"
 
 
-# ─── Pool of diverse investigative questions ─────────────────────────────────
-INVESTIGATIVE_QUESTIONS = [
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCAM-TYPE-AWARE INVESTIGATIVE QUESTIONS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Generic investigative questions (work for any scam type)
+GENERIC_QUESTIONS = [
     # Target: phone numbers
     "Can you give me your direct phone number so I can call back and confirm?",
     "What is the helpline number I should call to verify this?",
@@ -64,7 +85,7 @@ INVESTIGATIVE_QUESTIONS = [
     "Can you tell me your employee ID so I can verify with the head office?",
     "Which department exactly are you calling from?",
     "What is your designation in the organization?",
-    # Target: verification/red flags
+    # Target: verification/red flags (these surface red flags while asking)
     "Can you tell me which RBI regulation requires me to share my OTP with you?",
     "Can you give me a case number I can verify on the official website?",
     "Why can I not visit the branch directly instead of sharing details over chat?",
@@ -82,6 +103,123 @@ INVESTIGATIVE_QUESTIONS = [
     "Can you share a reference letter or official document to prove this is real?",
 ]
 
+# Scam-type-specific questions for richer probing
+SCAM_TYPE_QUESTIONS = {
+    "Bank Impersonation": [
+        "Which branch are you calling from? I want to visit in person to verify.",
+        "Can you tell me the exact IFSC code of your branch?",
+        "What is the registered complaint number for this issue?",
+        "I will call the bank's official number to verify — what should I tell them?",
+        "Can you tell me when the unauthorized transaction happened exactly?",
+        "What amount was the unauthorized transaction for?",
+        "Which RBI circular number mandates sharing OTP over phone?",
+        "Can you give me the reference number of the flagged transaction?",
+    ],
+    "UPI Fraud": [
+        "What is the exact UPI ID I should verify in my app?",
+        "Which payment app is this UPI ID registered with?",
+        "How much cashback amount am I supposed to receive?",
+        "Can you send the payment request from your end so I can verify the name?",
+        "Why does the UPI ID not show a verified business name?",
+        "Can you share the transaction reference number of the original payment?",
+        "Is there a customer care number for this UPI service?",
+    ],
+    "Credential Theft": [
+        "Why does the bank need my OTP — isn't the OTP for my own transactions?",
+        "Can you verify my identity first before I share anything?",
+        "My bank told me to never share OTP — can you confirm this is different?",
+        "Can you give me a case reference so I can call the bank to verify?",
+        "What is the transaction ID that triggered this security alert?",
+    ],
+    "Phishing": [
+        "This link looks unfamiliar — can you share the official website URL instead?",
+        "Is this link on the bank's registered domain?",
+        "Can you give me the customer support email to verify this link?",
+        "Why does this URL not match the bank's official website?",
+        "Can you send this offer to my registered email from the official ID?",
+    ],
+    "KYC Scam": [
+        "Which KYC regulation requires updating through chat?",
+        "Can you give me the official KYC update portal link?",
+        "What is the deadline for completing this KYC update?",
+        "I updated my KYC at the branch last month — why is it needed again?",
+        "Can you share the RBI circular number about mandatory KYC update?",
+        "What is your employee ID in the KYC department?",
+    ],
+    "Courier Scam": [
+        "What is the exact tracking number of this parcel?",
+        "Which courier company is handling this delivery?",
+        "Can you give me the sender's name and address on the parcel?",
+        "What customs office is the parcel currently at?",
+        "Can you share the customs duty order reference number?",
+        "What is the declared value and contents of the parcel?",
+    ],
+    "Lottery Scam": [
+        "What is the name of the lottery organization?",
+        "Can you give me the official registration number of this lottery?",
+        "When was the draw held and what was the winning ticket number?",
+        "Can you share the official website where I can verify my prize?",
+        "Why do I need to pay tax upfront instead of it being deducted from the prize?",
+        "Can you email me the winning notification from an official email address?",
+    ],
+    "Insurance Scam": [
+        "What is my policy number that you are referring to?",
+        "Can you tell me the policy start date and maturity date?",
+        "Which insurance company issued this policy?",
+        "Can you share the IRDA registration number of your company?",
+        "What is the sum assured under this policy?",
+        "Can you give me the branch office address to verify?",
+    ],
+    "Tax Scam": [
+        "What is my PAN number on file if you are from the IT department?",
+        "Can you share the assessment order number?",
+        "Which assessment year is this tax notice for?",
+        "Can you give me the official e-filing portal link to check?",
+        "What is the demand notice reference number?",
+    ],
+    "Loan Scam": [
+        "What is the RBI registration number of your NBFC?",
+        "Can you share the loan application reference number?",
+        "What is the official interest rate and processing fee?",
+        "Why is there a processing fee before loan approval?",
+        "Can you share the registered office address of your company?",
+    ],
+    "Tech Support Scam": [
+        "What is the error code or virus name detected on my computer?",
+        "Can you give me your Microsoft employee ID to verify?",
+        "What is the official support ticket number for my case?",
+        "Why are you calling me instead of showing an alert in the software?",
+        "Can you share the remote session ID you want me to enter?",
+    ],
+    "Job Scam": [
+        "What is the company name and its registration number?",
+        "Can you share the official job posting link on a verified job portal?",
+        "What is the HR department's official email address?",
+        "Why is there a registration or training fee for a job?",
+        "What is the CIN number of this company?",
+    ],
+    "Refund Scam": [
+        "What is the original order/transaction reference number?",
+        "Can you share the refund approval reference number?",
+        "Why do I need to share my bank details for a refund — don't you already have them?",
+        "Can you tell me the exact refund amount and the original purchase date?",
+    ],
+}
+
+# Red-flag-aware responses — these explicitly call out suspicious behavior
+RED_FLAG_RESPONSES = [
+    "Sir, I notice you are asking me to hurry — my bank always says to never rush. Can you explain why this is so urgent?",
+    "I am concerned because real banks never ask for OTP over phone. Can you tell me which RBI regulation requires this?",
+    "You are threatening that my account will be blocked — but the official app shows no issues. Why is there a mismatch?",
+    "I find it suspicious that you are asking for payment to a personal UPI ID instead of an official account. Can you explain?",
+    "My bank representative never contacts on WhatsApp or SMS — they use the bank app. Why are you contacting me this way?",
+    "I have been told that processing fees are deducted from the amount, not collected separately. Why are you asking me to pay?",
+    "This link does not look like the bank's official website — can you share the registered domain instead?",
+    "You are asking for my Aadhaar number — but UIDAI says Aadhaar should not be shared over phone. Can you explain?",
+    "I noticed you became more aggressive when I asked for verification. A real officer would not do that. Can you explain?",
+    "Real refunds go back to the original payment method — why do you need my account details again?",
+]
+
 
 class AgenticHoneypot:
     def __init__(self, gemini_api_key: str):
@@ -91,49 +229,35 @@ class AgenticHoneypot:
         self.min_messages_before_end = 8
         self.max_messages_per_session = 20
 
-        # Rate limiter: track timestamps of API calls
+        # Rate limiter
         self._api_call_times: List[float] = []
-        self._rpm_limit = 5  # Stay under free tier limit (5-10 RPM)
+        self._rpm_limit = 5
 
-        # Validate API key at startup
         if not gemini_api_key or gemini_api_key == "your_gemini_key":
-            print("⚠️  WARNING: Gemini API key is missing or default! All responses will use fallback pool questions.")
-            print("   Set GEMINI_API_KEY in your .env file to get dynamic AI-generated responses.")
+            print("⚠️  WARNING: Gemini API key missing! All responses will use fallback.")
         else:
             masked = gemini_api_key[:8] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 12 else "***"
             print(f"✅ Gemini API key loaded: {masked}")
-            print(f"📊 Rate limit set to {self._rpm_limit} RPM (free tier safe)")
+            print(f"📊 Rate limit: {self._rpm_limit} RPM")
 
     def _check_rate_limit(self) -> bool:
-        """Check if we can make an API call without exceeding RPM.
-        Returns True if OK to call, False if would exceed limit.
-        NEVER sleeps — caller should use fallback instead."""
         now = time.time()
-        # Remove calls older than 60 seconds
         self._api_call_times = [t for t in self._api_call_times if now - t < 60]
-
         if len(self._api_call_times) >= self._rpm_limit:
-            oldest = self._api_call_times[0]
-            wait_needed = 60 - (now - oldest)
-            print(f"⚠️ Rate limit hit ({len(self._api_call_times)}/{self._rpm_limit} RPM). Need to wait {wait_needed:.0f}s. Using fallback.")
+            print(f"⚠️ Rate limit hit ({len(self._api_call_times)}/{self._rpm_limit} RPM). Using fallback.")
             return False
-
         self._api_call_times.append(now)
         return True
 
     def _call_gemini(self, prompt: str, temperature: float = 0.7,
                      max_tokens: int = 500, response_json: bool = False) -> Optional[str]:
-        """Single Gemini API call with rate check (no sleeping/retrying).
-        Returns raw text response or None on failure."""
-
-        # Check rate limit — if exceeded, return None immediately (no sleep!)
         if not self._check_rate_limit():
             return None
 
         gen_config = {
             "temperature": temperature,
             "top_p": 0.95,
-            "maxOutputTokens": max_tokens
+            "maxOutputTokens": max_tokens,
         }
         if response_json:
             gen_config["response_mime_type"] = "application/json"
@@ -144,9 +268,9 @@ class AgenticHoneypot:
                 headers={"Content-Type": "application/json"},
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": gen_config
+                    "generationConfig": gen_config,
                 },
-                timeout=12  # Keep well under the 30s evaluator timeout
+                timeout=12,
             )
 
             if response.status_code == 200:
@@ -162,11 +286,9 @@ class AgenticHoneypot:
                     block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
                     print(f"⚠️ Gemini no candidates. Block: {block_reason}")
                     return None
-
             elif response.status_code == 429:
-                print(f"⚠️ Gemini 429 rate limited. Using fallback (no retry to avoid timeout).")
+                print("⚠️ Gemini 429 rate limited. Using fallback.")
                 return None
-
             else:
                 error_msg = ""
                 try:
@@ -177,22 +299,19 @@ class AgenticHoneypot:
                 return None
 
         except requests.exceptions.Timeout:
-            print(f"❌ Gemini timeout (12s)")
+            print("❌ Gemini timeout (12s)")
         except requests.exceptions.ConnectionError as e:
             print(f"❌ Gemini connection error: {e}")
         except Exception as e:
             print(f"❌ Gemini error: {e}")
-
         return None
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
     def _get_msg_text(self, msg: Dict) -> str:
-        """Read message text regardless of field name"""
         return msg.get("text") or msg.get("message") or ""
 
     def _get_conversation_context(self, session: Dict) -> str:
-        """Format last 12 messages as readable context for Gemini"""
         context = []
         for msg in session.get("conversation_history", [])[-12:]:
             role = "Scammer" if msg.get("sender") == "scammer" else "You"
@@ -200,9 +319,6 @@ class AgenticHoneypot:
         return "\n".join(context)
 
     def _get_recent_agent_replies(self, session: Dict, n: int = 5) -> List[str]:
-        """Return last N agent/user replies (lowercase) for repetition checking.
-        FIX #5: checks both 'agent' and 'user' sender fields since the evaluator
-        sends our replies back as sender='user' in conversationHistory."""
         replies = []
         for msg in reversed(session.get("conversation_history", [])):
             if msg.get("sender") in ("agent", "user"):
@@ -212,7 +328,6 @@ class AgenticHoneypot:
         return replies
 
     def _is_repeat(self, text: str, session: Dict) -> bool:
-        """Check if text closely matches any recent agent reply"""
         text_lower = text.strip().lower()
         recent = self._get_recent_agent_replies(session, n=6)
         for r in recent:
@@ -222,40 +337,63 @@ class AgenticHoneypot:
                 return True
         return False
 
+    def _get_detected_scam_type(self, session: Dict) -> str:
+        """Get the best-known scam type for this session."""
+        return session.get("scam_type", "Unknown")
+
     def _get_non_repeating_question(self, session: Dict) -> str:
-        """Pick a question from the pool that hasn't been used recently.
-        If the pool is exhausted, generate a dynamic question based on
-        what intelligence is still missing."""
+        """Pick a question that hasn't been used recently.
+        Prioritizes: (1) scam-type-specific questions, (2) missing-intel questions,
+        (3) red-flag-aware responses, (4) generic questions."""
         recent = self._get_recent_agent_replies(session, n=10)
-        used = set()
-        for q in INVESTIGATIVE_QUESTIONS:
-            for r in recent:
-                if q.lower()[:40] == r[:40]:
-                    used.add(q)
-        available = [q for q in INVESTIGATIVE_QUESTIONS if q not in used]
-        if available:
-            # Prioritize questions that target missing intelligence
-            artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        used_prefixes = set()
+        for r in recent:
+            used_prefixes.add(r[:40])
+
+        def is_unused(q: str) -> bool:
+            return q.lower()[:40] not in used_prefixes
+
+        artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        scam_type = self._get_detected_scam_type(session)
+
+        # Pool 1: Scam-type-specific questions
+        type_qs = SCAM_TYPE_QUESTIONS.get(scam_type, [])
+        available_type = [q for q in type_qs if is_unused(q)]
+        if available_type:
+            return random.choice(available_type)
+
+        # Pool 2: Red-flag-aware responses (surface red flags explicitly)
+        red_flag_count = len(session.get("detected_red_flags", []))
+        if red_flag_count >= 1:
+            available_rf = [q for q in RED_FLAG_RESPONSES if is_unused(q)]
+            if available_rf and random.random() < 0.4:  # 40% chance
+                return random.choice(available_rf)
+
+        # Pool 3: Missing-intelligence-targeted generic questions
+        available_generic = [q for q in GENERIC_QUESTIONS if is_unused(q)]
+        if available_generic:
             priority = []
             if not artifacts.get("phone_numbers"):
-                priority.extend([q for q in available if any(w in q.lower() for w in ["phone", "number", "call", "helpline", "toll"])])
+                priority.extend([q for q in available_generic if any(w in q.lower() for w in ["phone", "number", "call", "helpline", "toll"])])
             if not artifacts.get("upi_ids"):
-                priority.extend([q for q in available if any(w in q.lower() for w in ["upi", "payment"])])
+                priority.extend([q for q in available_generic if any(w in q.lower() for w in ["upi", "payment"])])
             if not artifacts.get("urls"):
-                priority.extend([q for q in available if any(w in q.lower() for w in ["website", "link", "portal", "url"])])
+                priority.extend([q for q in available_generic if any(w in q.lower() for w in ["website", "link", "portal", "url"])])
             if not artifacts.get("emails"):
-                priority.extend([q for q in available if any(w in q.lower() for w in ["email", "mail"])])
+                priority.extend([q for q in available_generic if any(w in q.lower() for w in ["email", "mail"])])
             if not artifacts.get("bank_accounts"):
-                priority.extend([q for q in available if any(w in q.lower() for w in ["bank account", "ifsc", "transfer"])])
+                priority.extend([q for q in available_generic if any(w in q.lower() for w in ["bank account", "ifsc", "transfer"])])
+            if not artifacts.get("case_ids"):
+                priority.extend([q for q in available_generic if any(w in q.lower() for w in ["case", "reference", "ticket", "employee id"])])
             if priority:
                 return random.choice(list(set(priority)))
-            return random.choice(available)
+            return random.choice(available_generic)
 
-        # All pool questions exhausted — generate a dynamic question
+        # Pool 4: Dynamic generated question
         return self._generate_dynamic_question(session)
 
     def _generate_dynamic_question(self, session: Dict) -> str:
-        """Generate a contextual question when the pool is exhausted."""
+        """Generate a contextual question when all pools are exhausted."""
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
         gaps = []
         if not artifacts.get("phone_numbers"):
@@ -271,7 +409,6 @@ class AgenticHoneypot:
         if not artifacts.get("case_ids"):
             gaps.append("case reference number")
 
-        # Dynamic questions based on missing intel
         dynamic_templates = [
             "Sir, I am very worried about my account. Can you please give me your {gap} so I can verify everything?",
             "Before I do anything, I need your {gap} for my records. My family is asking me to be careful.",
@@ -281,6 +418,8 @@ class AgenticHoneypot:
             "One more thing sir, can you also provide your {gap}? I want to keep a record of everything.",
             "I am noting down everything. What is your {gap}? I need it for my personal records.",
             "My neighbor who works in bank said I should ask for your {gap} before sharing anything.",
+            "Sir, without your {gap} I cannot proceed. My wife is insisting I verify everything first.",
+            "I want to believe you but I need your {gap} — even my bank branch asks for this during verification.",
         ]
 
         if gaps:
@@ -288,7 +427,6 @@ class AgenticHoneypot:
             template = random.choice(dynamic_templates)
             return template.format(gap=gap)
 
-        # If we somehow have all intel, use generic stalling
         stalling = [
             "Sir, please give me 5 minutes, I am getting another call from the bank.",
             "My internet is very slow, can you please wait while I try to check?",
@@ -324,18 +462,46 @@ class AgenticHoneypot:
 
         return False
 
-    # ─── Gemini: Analyse Message ──────────────────────────────────────────────
+    # ─── Detect Red Flags (session-level) ─────────────────────────────────────
+
+    def _detect_red_flags_from_message(self, message: str, session: Dict) -> List[str]:
+        """Detect red flags from the current message for scoring purposes."""
+        msg_lower = message.lower()
+        flags = []
+
+        if any(w in msg_lower for w in ["urgent", "immediately", "hurry", "quick", "right now", "act fast"]):
+            flags.append("urgency pressure tactics")
+        if any(w in msg_lower for w in ["otp", "pin", "password", "cvv", "mpin"]):
+            flags.append("requesting sensitive credentials")
+        if any(w in msg_lower for w in ["blocked", "suspended", "frozen", "deactivated", "compromised"]):
+            flags.append("threatening account suspension")
+        if any(w in msg_lower for w in ["send", "pay", "transfer", "deposit", "processing fee"]):
+            flags.append("unsolicited payment demand")
+        if any(w in msg_lower for w in ["legal action", "police", "arrest", "court", "warrant", "fir"]):
+            flags.append("legal intimidation tactics")
+        if any(w in msg_lower for w in ["bank manager", "rbi", "fraud department", "customs", "income tax", "government"]):
+            flags.append("impersonating authority figure")
+        if any(w in msg_lower for w in ["won", "prize", "lottery", "cashback", "bonus", "reward"]):
+            flags.append("unrealistic offer or prize claim")
+        if any(w in msg_lower for w in ["click", "download", "install"]) and any(w in msg_lower for w in ["http", "link", "www"]):
+            flags.append("directing to suspicious link")
+        if any(w in msg_lower for w in ["aadhaar", "pan card", "voter id", "passport"]):
+            flags.append("requesting government identity documents")
+        if any(w in msg_lower for w in ["share your", "provide your", "tell me your", "give me your"]):
+            flags.append("systematically harvesting personal data")
+
+        if not flags:
+            flags = ["unverified caller", "unsolicited contact"]
+
+        return flags
+
+    # ─── Analysis (rule-based to save API calls) ─────────────────────────────
 
     def _analyze_message_with_gemini(self, message: str, session: Dict) -> Dict:
-        """Analyze scammer message using rule-based fallback.
-        RPM OPTIMIZATION: Analysis is ALWAYS rule-based to save the limited
-        free-tier RPM (5-10/min) for response generation, which benefits
-        most from Gemini's natural language ability. This cuts API calls
-        from 2 per message to 1 per message."""
+        """Analyze scammer message — always rule-based to save RPM for responses."""
         return self._fallback_analysis(message, session)
 
     def _fallback_analysis(self, message: str, session: Dict) -> Dict:
-        """Rule-based fallback when Gemini is unavailable"""
         msg_lower = message.lower()
         scammer_count = len([m for m in session.get("conversation_history", []) if m.get("sender") == "scammer"])
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
@@ -359,11 +525,14 @@ class AgenticHoneypot:
         if not artifacts.get("case_ids"):       gaps.append("Case/reference ID needed")
         if not artifacts.get("emails"):         gaps.append("Email address needed")
 
-        red_flags = []
-        if any(w in msg_lower for w in ["urgent", "immediately", "block"]): red_flags.append("urgency pressure tactics")
-        if any(w in msg_lower for w in ["otp", "pin", "password"]):         red_flags.append("requesting sensitive credentials")
-        if any(w in msg_lower for w in ["send", "transfer", "pay"]):        red_flags.append("unsolicited payment demand")
-        if not red_flags: red_flags = ["unverified caller", "unsolicited contact", "pressure tactics"]
+        red_flags = self._detect_red_flags_from_message(message, session)
+
+        # Update session-level red flags
+        if "detected_red_flags" not in session:
+            session["detected_red_flags"] = []
+        for flag in red_flags:
+            if flag not in session["detected_red_flags"]:
+                session["detected_red_flags"].append(flag)
 
         scam_type = "Unknown"
         if "kyc" in msg_lower:                                              scam_type = "KYC Scam"
@@ -372,6 +541,12 @@ class AgenticHoneypot:
         elif "sbi" in msg_lower or "hdfc" in msg_lower or "bank" in msg_lower: scam_type = "Bank Impersonation"
         elif "lottery" in msg_lower or "prize" in msg_lower:                scam_type = "Lottery Scam"
         elif "courier" in msg_lower or "parcel" in msg_lower:               scam_type = "Courier Scam"
+        elif "insurance" in msg_lower or "policy" in msg_lower:             scam_type = "Insurance Scam"
+        elif "income tax" in msg_lower or "tax" in msg_lower:               scam_type = "Tax Scam"
+        elif "job" in msg_lower or "work from home" in msg_lower:           scam_type = "Job Scam"
+        elif "refund" in msg_lower:                                         scam_type = "Refund Scam"
+        elif "loan" in msg_lower:                                           scam_type = "Loan Scam"
+        elif "tech support" in msg_lower or "virus" in msg_lower:           scam_type = "Tech Support Scam"
 
         return {
             "stage": stage,
@@ -384,25 +559,23 @@ class AgenticHoneypot:
                 "has_urgency": any(w in msg_lower for w in ["urgent", "immediately", "hurry"]),
                 "requests_sensitive_info": any(w in msg_lower for w in ["otp", "pin", "password"]),
                 "requests_payment": any(w in msg_lower for w in ["send", "pay", "transfer"]),
-                "has_contact_info": bool(re.search(r'\d{10}', message))
+                "has_contact_info": bool(re.search(r'\d{10}', message)),
             },
-            "victim_response_strategy": "Ask investigative questions to extract contact details",
+            "victim_response_strategy": "Ask investigative questions to extract contact details and reference red flags",
             "specific_question_to_ask": question,
             "intelligence_gaps": gaps,
-            "confidence_score": 0.7
+            "confidence_score": 0.7,
         }
 
     # ─── Gemini: Generate Response ────────────────────────────────────────────
 
-    def _generate_contextual_response(self, message: str, session: Dict, analysis: Dict, ending_conversation: bool = False) -> str:
-        """Generate honeypot response using Gemini with rate limiting.
-        FIX #3: _should_end_conversation is NOT called again here — the single
-        authoritative decision is made in process_message and passed in."""
-
+    def _generate_contextual_response(self, message: str, session: Dict,
+                                       analysis: Dict, ending_conversation: bool = False) -> str:
         context = self._get_conversation_context(session)
         stage = session.get("current_stage", ConversationStage.INITIAL)
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
         recent_replies = self._get_recent_agent_replies(session, n=5)
+        all_red_flags = session.get("detected_red_flags", [])
 
         if ending_conversation:
             prompt = f"""You are a victim in a scam conversation who needs to end the chat naturally.
@@ -426,7 +599,7 @@ Your response (complete sentence only):"""
             if self._is_repeat(suggested_question, session):
                 suggested_question = self._get_non_repeating_question(session)
 
-            prompt = f"""You are playing the role of a confused, worried victim in a scam conversation. Your goal is to keep the scammer talking and extract as much information as possible.
+            prompt = f"""You are playing the role of a confused, worried victim in a scam conversation. Your goal is to keep the scammer talking AND extract as much information as possible.
 
 FULL CONVERSATION SO FAR:
 {context}
@@ -443,9 +616,12 @@ INTELLIGENCE ALREADY EXTRACTED:
 - URLs: {artifacts.get("urls", [])}
 - Bank Accounts: {artifacts.get("bank_accounts", [])}
 - Case/Ref IDs: {artifacts.get("case_ids", [])}
+- Emails: {artifacts.get("emails", [])}
 
 STILL NEED: {", ".join(gaps) if gaps else "probe for more details"}
-RED FLAGS NOTICED: {", ".join(red_flags) if red_flags else "suspicious contact"}
+
+RED FLAGS DETECTED SO FAR: {", ".join(all_red_flags[:5]) if all_red_flags else "suspicious contact"}
+NEW RED FLAGS IN THIS MESSAGE: {", ".join(red_flags[:3]) if red_flags else "none new"}
 
 YOUR STRATEGY: {strategy}
 ASK THIS QUESTION (incorporate naturally): {suggested_question}
@@ -460,16 +636,16 @@ CRITICAL RULES:
 4. Incorporate the suggested question naturally
 5. Your response MUST be a COMPLETE sentence, 20-40 words maximum
 6. Do NOT start a sentence you cannot finish
-7. If UPI mentioned — ask for EXACT UPI ID and confirm the handle
-8. If phone mentioned — ask for EXACT number with employee ID
-9. If website mentioned — ask for EXACT URL to verify
+7. IMPORTANT: Reference at least one red flag indirectly (e.g., "you are asking me to hurry but..." or "why do you need my OTP when bank says...")
+8. If UPI mentioned — ask for EXACT UPI ID and confirm the handle
+9. If phone mentioned — ask for EXACT number with employee ID
+10. If website mentioned — ask for EXACT URL to verify
 
 Your response (complete, different from recent replies, 20-40 words):"""
 
         raw = self._call_gemini(prompt, temperature=0.9, max_tokens=200)
         if raw:
             text = raw.replace('"', '').replace("'", "").strip()
-            # Clean up common Gemini artifacts
             text = re.sub(r'^\*+|\*+$', '', text).strip()
             text = re.sub(r'^\(.*?\)\s*', '', text).strip()
 
@@ -477,20 +653,14 @@ Your response (complete, different from recent replies, 20-40 words):"""
                 print(f"🤖 Response: {text}")
                 return text
             else:
-                print(f"⚠️ Gemini reply rejected (short/repeat), using pool question")
+                print("⚠️ Gemini reply rejected (short/repeat), using pool question")
 
         return self._get_non_repeating_question(session)
 
     # ─── Intelligence Extraction ──────────────────────────────────────────────
 
     def _extract_intel_from_text(self, artifacts: Dict, text: str):
-        """Extract intelligence from a single text string into artifacts dict.
-        Separated out so it can be called on individual messages OR full history."""
-
-        # UPI IDs — domain has NO dot (emails have dots in domain)
-        # FIX v2: addresses in explicit "email" context are routed to emails,
-        # even if the domain has no dot (e.g. scammer.fraud@fakebank).
-        # Email-context patterns are matched FIRST.
+        """Extract intelligence from a single text string into artifacts dict."""
 
         # Step 1: Capture addresses in email context → always EMAIL
         email_context_patterns = [
@@ -505,7 +675,7 @@ Your response (complete, different from recent replies, 20-40 words):"""
                 if '@' in val:
                     email_context_addresses.add(val)
 
-        # Step 2: Capture UPI IDs — skip anything in email-context
+        # Step 2: UPI IDs — skip anything in email-context
         upi_patterns = [
             r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|paytm|phonepe|gpay|ybl|axl|fakebank|fakeupi|upi)\b(?!\.)',
             r'(?:send)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
@@ -520,7 +690,6 @@ Your response (complete, different from recent replies, 20-40 words):"""
                 upi = match.group(1) if match.lastindex else match.group(0)
                 upi = upi.strip().lower()
                 domain = upi.split('@')[1] if '@' in upi else ''
-                # Skip if captured as email-context address
                 if upi in email_context_addresses:
                     continue
                 if '@' in upi and '.' not in domain:
@@ -548,7 +717,7 @@ Your response (complete, different from recent replies, 20-40 words):"""
             r'\+91[-\s]?\d{10}',
             r'(?<!\d)91(\d{10})(?!\d)',
             r'(?<!\d)([6-9]\d{9})(?!\d)',
-            r'(?:call|contact|phone|mobile|number|reach)[:\s]+(\+?91[-\s]?\d{10}|\d{10})',
+            r'(?:call|contact|phone|mobile|number|reach|helpline|toll)[:\s]+(\+?91[-\s]?\d{10}|\d{10})',
         ]
         if "phone_numbers" not in artifacts:
             artifacts["phone_numbers"] = []
@@ -565,7 +734,7 @@ Your response (complete, different from recent replies, 20-40 words):"""
                     artifacts["phone_numbers"].append(formatted)
                     print(f"🎯 Phone: {formatted}")
 
-        # Bank accounts — FIX #6: broader patterns including "account NNNN" without number/no
+        # Bank accounts
         bank_patterns = [
             r'account\s*(?:number|no\.?|#)?\s*(?:is|:)?\s*(\d{9,18})',
             r'a/?c\s*(?:number|no\.?|#)?\s*(?:is|:)?\s*(\d{9,18})',
@@ -596,19 +765,20 @@ Your response (complete, different from recent replies, 20-40 words):"""
             if '.' in email.split('@')[1] and email not in artifacts["emails"] and email not in artifacts.get("upi_ids", []):
                 artifacts["emails"].append(email)
                 print(f"🎯 Email: {email}")
-        # Also add email-context captures (even dotless domains like user@fakebank)
         for email in email_context_addresses:
             if email not in artifacts["emails"] and email not in artifacts.get("upi_ids", []):
                 artifacts["emails"].append(email)
                 print(f"🎯 Email (context): {email}")
 
-        # Case / Reference / Staff IDs
-        # FIX: exclude pure digit strings (those are bank accounts or phone numbers)
-        # A real case ID must contain at least one letter OR a dash between segments.
+        # Case / Reference / Staff / Policy / Order IDs
         case_patterns = [
             r'(?:case|ticket|ref(?:erence)?|complaint|order|policy)\s*(?:id|number|no\.?|#)?[:\s]+([A-Z0-9][A-Z0-9\-]{3,19})',
             r'(?:case|ticket|ref(?:erence)?|complaint|order|policy)\s*(?:id|number|no\.?|#)\s*(?:is|:)\s*([A-Z0-9][A-Z0-9\-]{3,19})',
-            r'(?:staff|employee|badge)\s*(?:id|number|no\.?|#)?[:\s]+([A-Z0-9][A-Z0-9\-]{2,19})',
+            r'(?:staff|employee|badge|agent)\s*(?:id|number|no\.?|#)?[:\s]+([A-Z0-9][A-Z0-9\-]{2,19})',
+            # Policy numbers
+            r'(?:policy)\s*(?:number|no\.?|#)?[:\s]+([A-Z]{2,5}[-/]?\d{3,12})',
+            # Order numbers
+            r'(?:order)\s*(?:number|no\.?|#)?[:\s]+([A-Z]{2,6}[-/]?\d{3,12})',
         ]
         if "case_ids" not in artifacts:
             artifacts["case_ids"] = []
@@ -618,13 +788,10 @@ Your response (complete, different from recent replies, 20-40 words):"""
             for match in re.findall(pattern, text, re.IGNORECASE):
                 stripped = match.strip()
                 digits_only = re.sub(r'\D', '', stripped)
-                # Skip if it's a pure number (bank account or phone)
                 if stripped.isdigit():
                     continue
-                # Skip if digits match a known bank account or phone
                 if digits_only in bank_acct_set or digits_only in phone_digit_set:
                     continue
-                # Must contain at least one letter OR have a dash (real ref IDs like 2023-4567)
                 has_letter = bool(re.search(r'[A-Za-z]', stripped))
                 has_dash = '-' in stripped
                 if not has_letter and not has_dash:
@@ -644,17 +811,10 @@ Your response (complete, different from recent replies, 20-40 words):"""
                     artifacts["amounts"].append(clean)
 
     def _update_extracted_intelligence(self, session: Dict, message: str):
-        """FIX #2: Extract intelligence from the current message AND re-scan
-        the full conversation history so earlier missed intel is captured."""
         if "extracted_intelligence" not in session:
             session["extracted_intelligence"] = {"artifacts": {}}
         artifacts = session["extracted_intelligence"]["artifacts"]
-
-        # Scan current message
         self._extract_intel_from_text(artifacts, message)
-
-        # Also re-scan all scammer messages in history to catch anything
-        # missed on earlier turns (e.g. if Gemini was down that turn)
         for msg in session.get("conversation_history", []):
             if msg.get("sender") == "scammer":
                 self._extract_intel_from_text(artifacts, self._get_msg_text(msg))
@@ -683,27 +843,13 @@ Your response (complete, different from recent replies, 20-40 words):"""
             "extracting":       ConversationStage.EXTRACTING,
             "deep_extraction":  ConversationStage.DEEP_EXTRACTION,
             "exit_preparation": ConversationStage.EXIT_PREPARATION,
-            "ended":            ConversationStage.ENDED
+            "ended":            ConversationStage.ENDED,
         }
-
-        # FIX #3: Do NOT call _should_end_conversation here.
-        # The single authoritative end-check is in process_message().
         return stage_map.get(analysis.get("stage", "building_trust"), ConversationStage.BUILDING_TRUST)
 
     # ─── Main Entry Point ─────────────────────────────────────────────────────
 
     def process_message(self, input_data: Dict) -> Dict:
-        """Process incoming scammer message and return honeypot response.
-
-        FIX #1: Does NOT append the scammer message to conversation_history.
-        main.py syncs the full history from the DB before calling this method,
-        so the message is already present. Appending again caused duplicates.
-
-        FIX #3: _should_end_conversation is called exactly ONCE here.
-
-        FIX #4: Single-phase exit — when should_end is True, we generate
-        the exit message AND set ended=True in the same turn.
-        """
         try:
             session_id = input_data["session_id"]
             message = input_data["message"]
@@ -716,42 +862,43 @@ Your response (complete, different from recent replies, 20-40 words):"""
                     "current_stage": ConversationStage.INITIAL,
                     "extracted_intelligence": {"artifacts": {}},
                     "ended": False,
-                    "scam_analysis": []
+                    "scam_analysis": [],
+                    "detected_red_flags": [],
                 }
                 print(f"\n{'='*60}\n🆕 NEW SESSION: {session_id}\n{'='*60}")
 
             session = self.sessions[session_id]
 
-            # FIX #1: Do NOT append scammer message — main.py synced the
-            # full conversation_history from DB already.
             print(f"\n📱 SCAMMER [{session_id[:8]}]: {message}")
 
-            # Extract intelligence from message + full history (FIX #2)
+            # Extract intelligence from message + full history
             self._update_extracted_intelligence(session, message)
 
             # Analyse
             analysis = self._analyze_message_with_gemini(message, session)
-            session["scam_analysis"].append({"timestamp": datetime.now().isoformat(), "analysis": analysis})
+            session["scam_analysis"].append({
+                "timestamp": datetime.now().isoformat(),
+                "analysis": analysis,
+            })
 
-            # Stage (FIX #3: no end check inside _determine_next_stage)
+            # Stage
             next_stage = self._determine_next_stage(session, analysis)
             session["current_stage"] = next_stage
 
-            # FIX #3: Single authoritative end check
+            # End check
             should_end = self._should_end_conversation(session)
 
-            # Generate response (passes should_end directly, no re-check)
+            # Generate response
             agent_response = self._generate_contextual_response(message, session, analysis, should_end)
 
-            # Append agent response to session history ONLY so the repetition
-            # guard can see it on the next turn. main.py stores it in DB separately.
+            # Append agent response to session history
             session["conversation_history"].append({
                 "timestamp": datetime.now().isoformat(),
                 "sender": "agent",
-                "message": agent_response
+                "message": agent_response,
             })
 
-            # FIX #4: Single-phase exit
+            # End if needed
             if should_end:
                 session["ended"] = True
                 session["end_time"] = datetime.now().isoformat()
@@ -759,7 +906,7 @@ Your response (complete, different from recent replies, 20-40 words):"""
                 next_stage = ConversationStage.ENDED
                 print("✅ Conversation ended")
 
-            print(f"📊 Stage: {next_stage.value} | Extraction: {self._calculate_extraction_score(session):.2f} | Msgs: {len(session['conversation_history'])}")
+            print(f"📊 Stage: {next_stage.value} | Extraction: {self._calculate_extraction_score(session):.2f} | RedFlags: {len(session.get('detected_red_flags', []))} | Msgs: {len(session['conversation_history'])}")
 
             return {
                 "success": True,
@@ -777,9 +924,9 @@ Your response (complete, different from recent replies, 20-40 words):"""
                         "tactic": analysis.get("scammer_tactic", "unknown"),
                         "confidence": analysis.get("confidence_score", 0.5),
                         "red_flags": analysis.get("red_flags", []),
-                        "intelligence_gaps": analysis.get("intelligence_gaps", [])
-                    }
-                }
+                        "intelligence_gaps": analysis.get("intelligence_gaps", []),
+                    },
+                },
             }
 
         except Exception as e:
@@ -802,8 +949,8 @@ Your response (complete, different from recent replies, 20-40 words):"""
                 "data": {
                     "conversation_active": True,
                     "message_count": len([m for m in session["conversation_history"] if m.get("sender") == "scammer"]),
-                    "extraction_progress": self._calculate_extraction_score(session)
-                }
+                    "extraction_progress": self._calculate_extraction_score(session),
+                },
             }
 
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
@@ -822,10 +969,11 @@ Your response (complete, different from recent replies, 20-40 words):"""
                     "bank_accounts": artifacts.get("bank_accounts", []),
                     "emails": artifacts.get("emails", []),
                     "case_ids": artifacts.get("case_ids", []),
-                    "amounts": artifacts.get("amounts", [])
+                    "amounts": artifacts.get("amounts", []),
                 },
+                "red_flags_detected": session.get("detected_red_flags", []),
                 "scam_type": session["scam_analysis"][-1]["analysis"].get("scam_type", "Unknown") if session["scam_analysis"] else "Unknown",
                 "first_message": scammer_msgs[0] if scammer_msgs else "",
-                "last_message": scammer_msgs[-1] if scammer_msgs else ""
-            }
+                "last_message": scammer_msgs[-1] if scammer_msgs else "",
+            },
         }
