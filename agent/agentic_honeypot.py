@@ -104,90 +104,84 @@ class AgenticHoneypot:
             print(f"✅ Gemini API key loaded: {masked}")
             print(f"📊 Rate limit set to {self._rpm_limit} RPM (free tier safe)")
 
-    def _wait_for_rate_limit(self):
-        """Wait if necessary to stay under RPM limit"""
+    def _check_rate_limit(self) -> bool:
+        """Check if we can make an API call without exceeding RPM.
+        Returns True if OK to call, False if would exceed limit.
+        NEVER sleeps — caller should use fallback instead."""
         now = time.time()
         # Remove calls older than 60 seconds
         self._api_call_times = [t for t in self._api_call_times if now - t < 60]
 
         if len(self._api_call_times) >= self._rpm_limit:
-            # Need to wait until the oldest call in the window expires
-            wait_time = 60 - (now - self._api_call_times[0]) + 0.5
-            if wait_time > 0:
-                print(f"⏳ Rate limit: waiting {wait_time:.1f}s ({len(self._api_call_times)}/{self._rpm_limit} RPM)")
-                time.sleep(wait_time)
+            oldest = self._api_call_times[0]
+            wait_needed = 60 - (now - oldest)
+            print(f"⚠️ Rate limit hit ({len(self._api_call_times)}/{self._rpm_limit} RPM). Need to wait {wait_needed:.0f}s. Using fallback.")
+            return False
 
-        self._api_call_times.append(time.time())
+        self._api_call_times.append(now)
+        return True
 
     def _call_gemini(self, prompt: str, temperature: float = 0.7,
-                     max_tokens: int = 500, response_json: bool = False,
-                     retries: int = 2) -> Optional[str]:
-        """Single Gemini API call with rate limiting and retry logic.
+                     max_tokens: int = 500, response_json: bool = False) -> Optional[str]:
+        """Single Gemini API call with rate check (no sleeping/retrying).
         Returns raw text response or None on failure."""
 
-        for attempt in range(retries + 1):
-            self._wait_for_rate_limit()
+        # Check rate limit — if exceeded, return None immediately (no sleep!)
+        if not self._check_rate_limit():
+            return None
 
-            gen_config = {
-                "temperature": temperature,
-                "top_p": 0.95,
-                "maxOutputTokens": max_tokens
-            }
-            if response_json:
-                gen_config["response_mime_type"] = "application/json"
+        gen_config = {
+            "temperature": temperature,
+            "top_p": 0.95,
+            "maxOutputTokens": max_tokens
+        }
+        if response_json:
+            gen_config["response_mime_type"] = "application/json"
 
-            try:
-                response = requests.post(
-                    f"{self.base_url}?key={self.gemini_api_key}",
-                    headers={"Content-Type": "application/json"},
-                    json={
-                        "contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": gen_config
-                    },
-                    timeout=20
-                )
+        try:
+            response = requests.post(
+                f"{self.base_url}?key={self.gemini_api_key}",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": gen_config
+                },
+                timeout=12  # Keep well under the 30s evaluator timeout
+            )
 
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get("candidates"):
-                        candidate = result["candidates"][0]
-                        finish_reason = candidate.get("finishReason", "STOP")
-                        if finish_reason not in ("STOP", "stop"):
-                            print(f"⚠️ Gemini cut off: {finish_reason}")
-                            return None
-                        return candidate["content"]["parts"][0]["text"].strip()
-                    else:
-                        block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
-                        print(f"⚠️ Gemini no candidates. Block: {block_reason}")
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("candidates"):
+                    candidate = result["candidates"][0]
+                    finish_reason = candidate.get("finishReason", "STOP")
+                    if finish_reason not in ("STOP", "stop"):
+                        print(f"⚠️ Gemini cut off: {finish_reason}")
                         return None
-
-                elif response.status_code == 429:
-                    # Rate limited — wait and retry
-                    retry_after = int(response.headers.get("Retry-After", 15))
-                    print(f"⚠️ Gemini 429 rate limited. Waiting {retry_after}s (attempt {attempt+1}/{retries+1})")
-                    time.sleep(retry_after)
-                    continue
-
+                    return candidate["content"]["parts"][0]["text"].strip()
                 else:
-                    error_msg = ""
-                    try:
-                        error_msg = response.json().get("error", {}).get("message", "")
-                    except Exception:
-                        error_msg = response.text[:200]
-                    print(f"⚠️ Gemini {response.status_code}: {error_msg}")
+                    block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
+                    print(f"⚠️ Gemini no candidates. Block: {block_reason}")
                     return None
 
-            except requests.exceptions.Timeout:
-                print(f"❌ Gemini timeout (attempt {attempt+1}/{retries+1})")
-                if attempt < retries:
-                    time.sleep(2)
-                    continue
-            except requests.exceptions.ConnectionError as e:
-                print(f"❌ Gemini connection error: {e}")
+            elif response.status_code == 429:
+                print(f"⚠️ Gemini 429 rate limited. Using fallback (no retry to avoid timeout).")
                 return None
-            except Exception as e:
-                print(f"❌ Gemini error: {e}")
+
+            else:
+                error_msg = ""
+                try:
+                    error_msg = response.json().get("error", {}).get("message", "")
+                except Exception:
+                    error_msg = response.text[:200]
+                print(f"⚠️ Gemini {response.status_code}: {error_msg}")
                 return None
+
+        except requests.exceptions.Timeout:
+            print(f"❌ Gemini timeout (12s)")
+        except requests.exceptions.ConnectionError as e:
+            print(f"❌ Gemini connection error: {e}")
+        except Exception as e:
+            print(f"❌ Gemini error: {e}")
 
         return None
 
