@@ -2,6 +2,7 @@ import json
 import random
 import re
 import requests
+import time
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from enum import Enum
@@ -90,6 +91,10 @@ class AgenticHoneypot:
         self.min_messages_before_end = 8
         self.max_messages_per_session = 20
 
+        # Rate limiter: track timestamps of API calls
+        self._api_call_times: List[float] = []
+        self._rpm_limit = 5  # Stay under free tier limit (5-10 RPM)
+
         # Validate API key at startup
         if not gemini_api_key or gemini_api_key == "your_gemini_key":
             print("⚠️  WARNING: Gemini API key is missing or default! All responses will use fallback pool questions.")
@@ -97,27 +102,94 @@ class AgenticHoneypot:
         else:
             masked = gemini_api_key[:8] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 12 else "***"
             print(f"✅ Gemini API key loaded: {masked}")
-            # Quick validation ping
+            print(f"📊 Rate limit set to {self._rpm_limit} RPM (free tier safe)")
+
+    def _wait_for_rate_limit(self):
+        """Wait if necessary to stay under RPM limit"""
+        now = time.time()
+        # Remove calls older than 60 seconds
+        self._api_call_times = [t for t in self._api_call_times if now - t < 60]
+
+        if len(self._api_call_times) >= self._rpm_limit:
+            # Need to wait until the oldest call in the window expires
+            wait_time = 60 - (now - self._api_call_times[0]) + 0.5
+            if wait_time > 0:
+                print(f"⏳ Rate limit: waiting {wait_time:.1f}s ({len(self._api_call_times)}/{self._rpm_limit} RPM)")
+                time.sleep(wait_time)
+
+        self._api_call_times.append(time.time())
+
+    def _call_gemini(self, prompt: str, temperature: float = 0.7,
+                     max_tokens: int = 500, response_json: bool = False,
+                     retries: int = 2) -> Optional[str]:
+        """Single Gemini API call with rate limiting and retry logic.
+        Returns raw text response or None on failure."""
+
+        for attempt in range(retries + 1):
+            self._wait_for_rate_limit()
+
+            gen_config = {
+                "temperature": temperature,
+                "top_p": 0.95,
+                "maxOutputTokens": max_tokens
+            }
+            if response_json:
+                gen_config["response_mime_type"] = "application/json"
+
             try:
-                test_resp = requests.post(
+                response = requests.post(
                     f"{self.base_url}?key={self.gemini_api_key}",
                     headers={"Content-Type": "application/json"},
-                    json={"contents": [{"parts": [{"text": "Say OK"}]}],
-                          "generationConfig": {"maxOutputTokens": 10}},
-                    timeout=10
+                    json={
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": gen_config
+                    },
+                    timeout=20
                 )
-                if test_resp.status_code == 200:
-                    print("✅ Gemini API connection verified")
+
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("candidates"):
+                        candidate = result["candidates"][0]
+                        finish_reason = candidate.get("finishReason", "STOP")
+                        if finish_reason not in ("STOP", "stop"):
+                            print(f"⚠️ Gemini cut off: {finish_reason}")
+                            return None
+                        return candidate["content"]["parts"][0]["text"].strip()
+                    else:
+                        block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
+                        print(f"⚠️ Gemini no candidates. Block: {block_reason}")
+                        return None
+
+                elif response.status_code == 429:
+                    # Rate limited — wait and retry
+                    retry_after = int(response.headers.get("Retry-After", 15))
+                    print(f"⚠️ Gemini 429 rate limited. Waiting {retry_after}s (attempt {attempt+1}/{retries+1})")
+                    time.sleep(retry_after)
+                    continue
+
                 else:
-                    error_detail = ""
+                    error_msg = ""
                     try:
-                        error_detail = test_resp.json().get("error", {}).get("message", "")
+                        error_msg = response.json().get("error", {}).get("message", "")
                     except Exception:
-                        error_detail = test_resp.text[:200]
-                    print(f"⚠️  Gemini API test failed: {test_resp.status_code} — {error_detail}")
-                    print("   Responses will fall back to pool questions until API is working.")
+                        error_msg = response.text[:200]
+                    print(f"⚠️ Gemini {response.status_code}: {error_msg}")
+                    return None
+
+            except requests.exceptions.Timeout:
+                print(f"❌ Gemini timeout (attempt {attempt+1}/{retries+1})")
+                if attempt < retries:
+                    time.sleep(2)
+                    continue
+            except requests.exceptions.ConnectionError as e:
+                print(f"❌ Gemini connection error: {e}")
+                return None
             except Exception as e:
-                print(f"⚠️  Gemini API connection test failed: {e}")
+                print(f"❌ Gemini error: {e}")
+                return None
+
+        return None
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -261,108 +333,11 @@ class AgenticHoneypot:
     # ─── Gemini: Analyse Message ──────────────────────────────────────────────
 
     def _analyze_message_with_gemini(self, message: str, session: Dict) -> Dict:
-        context = self._get_conversation_context(session)
-        scammer_count = len([m for m in session.get("conversation_history", []) if m.get("sender") == "scammer"])
-        artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
-        recent_replies = self._get_recent_agent_replies(session, n=4)
-
-        prompt = f"""You are analyzing a scam conversation to help an AI honeypot respond naturally and extract intelligence.
-
-CONVERSATION SO FAR:
-{context}
-
-SCAMMER'S LATEST MESSAGE: "{message}"
-
-INTELLIGENCE EXTRACTED SO FAR:
-- UPI IDs: {artifacts.get("upi_ids", [])}
-- Phone Numbers: {artifacts.get("phone_numbers", [])}
-- URLs: {artifacts.get("urls", [])}
-- Bank Accounts: {artifacts.get("bank_accounts", [])}
-- Emails: {artifacts.get("emails", [])}
-- Case/Ref IDs: {artifacts.get("case_ids", [])}
-
-RECENT HONEYPOT REPLIES (DO NOT suggest repeating these):
-{chr(10).join(f"- {r}" for r in recent_replies)}
-
-CURRENT STAGE: {session.get("current_stage", ConversationStage.INITIAL).value}
-SCAMMER MESSAGES SO FAR: {scammer_count}
-
-Analyze and return ONLY valid JSON:
-{{
-    "stage": "initial|building_trust|extracting|deep_extraction|exit_preparation",
-    "scam_type": "specific scam type detected (e.g. Bank Impersonation, KYC Scam, UPI Fraud, Phishing)",
-    "urgency_level": "low|medium|high",
-    "scammer_tactic": "brief description",
-    "red_flags": ["list at least 3 red flags you observe in this conversation"],
-    "key_elements": {{
-        "has_upi_id": true,
-        "has_urgency": true,
-        "requests_sensitive_info": true,
-        "requests_payment": true,
-        "has_contact_info": true
-    }},
-    "victim_response_strategy": "how to respond to extract more intel",
-    "specific_question_to_ask": "a DIFFERENT investigative question not already in RECENT HONEYPOT REPLIES above",
-    "intelligence_gaps": ["what intel is still missing"],
-    "confidence_score": 0.0
-}}"""
-
-        try:
-            response = requests.post(
-                f"{self.base_url}?key={self.gemini_api_key}",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.4,
-                        "top_p": 0.95,
-                        "top_k": 40,
-                        "response_mime_type": "application/json"
-                    }
-                },
-                timeout=15
-            )
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("candidates"):
-                    candidate = result["candidates"][0]
-                    finish_reason = candidate.get("finishReason", "STOP")
-                    if finish_reason not in ("STOP", "stop"):
-                        print(f"⚠️ Gemini analysis cut off: {finish_reason}, using fallback")
-                        return self._fallback_analysis(message, session)
-
-                    raw = candidate["content"]["parts"][0]["text"].strip()
-                    raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.MULTILINE)
-                    raw = re.sub(r'```\s*$', '', raw, flags=re.MULTILINE)
-                    raw = raw.strip()
-
-                    match = re.search(r'\{.*\}', raw, re.DOTALL)
-                    if match:
-                        try:
-                            analysis = json.loads(match.group())
-                            print(f"✅ Gemini Analysis: stage={analysis.get('stage')} | scam_type={analysis.get('scam_type')} | {analysis.get('victim_response_strategy', '')[:50]}")
-                            return analysis
-                        except json.JSONDecodeError as e:
-                            print(f"⚠️ JSON parse failed: {e} | raw: {raw[:200]}")
-                            return self._fallback_analysis(message, session)
-                    else:
-                        print(f"⚠️ No JSON found in Gemini response: {raw[:200]}")
-                        return self._fallback_analysis(message, session)
-
-            print(f"⚠️ Gemini analysis returned {response.status_code}")
-            try:
-                error_body = response.json()
-                error_msg = error_body.get("error", {}).get("message", response.text[:200])
-                print(f"   Error detail: {error_msg}")
-            except Exception:
-                print(f"   Raw response: {response.text[:300]}")
-        except requests.exceptions.Timeout:
-            print(f"❌ Gemini analysis timed out (15s)")
-        except requests.exceptions.ConnectionError as e:
-            print(f"❌ Gemini analysis connection error: {e}")
-        except Exception as e:
-            print(f"❌ Gemini analysis error: {e}")
-
+        """Analyze scammer message using rule-based fallback.
+        RPM OPTIMIZATION: Analysis is ALWAYS rule-based to save the limited
+        free-tier RPM (5-10/min) for response generation, which benefits
+        most from Gemini's natural language ability. This cuts API calls
+        from 2 per message to 1 per message."""
         return self._fallback_analysis(message, session)
 
     def _fallback_analysis(self, message: str, session: Dict) -> Dict:
@@ -426,7 +401,7 @@ Analyze and return ONLY valid JSON:
     # ─── Gemini: Generate Response ────────────────────────────────────────────
 
     def _generate_contextual_response(self, message: str, session: Dict, analysis: Dict, ending_conversation: bool = False) -> str:
-        """Generate honeypot response using Gemini.
+        """Generate honeypot response using Gemini with rate limiting.
         FIX #3: _should_end_conversation is NOT called again here — the single
         authoritative decision is made in process_message and passed in."""
 
@@ -435,9 +410,8 @@ Analyze and return ONLY valid JSON:
         artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
         recent_replies = self._get_recent_agent_replies(session, n=5)
 
-        try:
-            if ending_conversation:
-                prompt = f"""You are a victim in a scam conversation who needs to end the chat naturally.
+        if ending_conversation:
+            prompt = f"""You are a victim in a scam conversation who needs to end the chat naturally.
 
 CONVERSATION:
 {context}
@@ -449,16 +423,16 @@ Examples: "Phone battery dying, will message you later", "My boss just called, s
 
 Your response (complete sentence only):"""
 
-            else:
-                strategy = analysis.get("victim_response_strategy", "Ask for more details")
-                suggested_question = analysis.get("specific_question_to_ask", "")
-                gaps = analysis.get("intelligence_gaps", [])
-                red_flags = analysis.get("red_flags", [])
+        else:
+            strategy = analysis.get("victim_response_strategy", "Ask for more details")
+            suggested_question = analysis.get("specific_question_to_ask", "")
+            gaps = analysis.get("intelligence_gaps", [])
+            red_flags = analysis.get("red_flags", [])
 
-                if self._is_repeat(suggested_question, session):
-                    suggested_question = self._get_non_repeating_question(session)
+            if self._is_repeat(suggested_question, session):
+                suggested_question = self._get_non_repeating_question(session)
 
-                prompt = f"""You are playing the role of a confused, worried victim in a scam conversation. Your goal is to keep the scammer talking and extract as much information as possible.
+            prompt = f"""You are playing the role of a confused, worried victim in a scam conversation. Your goal is to keep the scammer talking and extract as much information as possible.
 
 FULL CONVERSATION SO FAR:
 {context}
@@ -498,67 +472,18 @@ CRITICAL RULES:
 
 Your response (complete, different from recent replies, 20-40 words):"""
 
-            response = requests.post(
-                f"{self.base_url}?key={self.gemini_api_key}",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.9,
-                        "top_p": 0.95,
-                        "maxOutputTokens": 200
-                    }
-                },
-                timeout=15
-            )
+        raw = self._call_gemini(prompt, temperature=0.9, max_tokens=200)
+        if raw:
+            text = raw.replace('"', '').replace("'", "").strip()
+            # Clean up common Gemini artifacts
+            text = re.sub(r'^\*+|\*+$', '', text).strip()
+            text = re.sub(r'^\(.*?\)\s*', '', text).strip()
 
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("candidates"):
-                    candidate = result["candidates"][0]
-                    finish_reason = candidate.get("finishReason", "STOP")
-                    if finish_reason not in ("STOP", "stop"):
-                        print(f"⚠️ Gemini reply cut off: {finish_reason}, using fallback")
-                        return self._get_non_repeating_question(session)
-
-                    text = candidate["content"]["parts"][0]["text"].strip()
-                    text = text.replace('"', '').replace("'", "").strip()
-                    # Clean up common Gemini artifacts
-                    text = re.sub(r'^\*+|\*+$', '', text).strip()
-                    text = re.sub(r'^\(.*?\)\s*', '', text).strip()
-
-                    if len(text) < 10:
-                        print(f"⚠️ Gemini reply too short: '{text}', using pool question")
-                        return self._get_non_repeating_question(session)
-
-                    if self._is_repeat(text, session):
-                        print(f"⚠️ Gemini generated repeat reply, using pool question")
-                        return self._get_non_repeating_question(session)
-
-                    print(f"🤖 Response: {text}")
-                    return text
-                else:
-                    # No candidates — might be safety block
-                    block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
-                    print(f"⚠️ Gemini returned no candidates. Block reason: {block_reason}")
-                    print(f"   Full response: {json.dumps(result)[:500]}")
-
+            if len(text) >= 10 and not self._is_repeat(text, session):
+                print(f"🤖 Response: {text}")
+                return text
             else:
-                # Non-200 status — log details for debugging
-                print(f"⚠️ Gemini response failed: {response.status_code}")
-                try:
-                    error_body = response.json()
-                    error_msg = error_body.get("error", {}).get("message", response.text[:200])
-                    print(f"   Error detail: {error_msg}")
-                except Exception:
-                    print(f"   Raw response: {response.text[:300]}")
-
-        except requests.exceptions.Timeout:
-            print(f"❌ Gemini response timed out (15s)")
-        except requests.exceptions.ConnectionError as e:
-            print(f"❌ Gemini connection error: {e}")
-        except Exception as e:
-            print(f"❌ Response generation error: {e}")
+                print(f"⚠️ Gemini reply rejected (short/repeat), using pool question")
 
         return self._get_non_repeating_question(session)
 
@@ -588,7 +513,7 @@ Your response (complete, different from recent replies, 20-40 words):"""
 
         # Step 2: Capture UPI IDs — skip anything in email-context
         upi_patterns = [
-            r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|paytm|phonepe|gpay|ybl|axl|fakebank|fakeupi|upi)\b',
+            r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|paytm|phonepe|gpay|ybl|axl|fakebank|fakeupi|upi)\b(?!\.)',
             r'(?:send)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
             r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
             r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',

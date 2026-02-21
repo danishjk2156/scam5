@@ -134,7 +134,8 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
     # Step 2: Capture UPI IDs — exclude anything already captured as email-context
     upi_patterns = [
         # Pattern 1: known UPI provider handles — always UPI (full match, no group)
-        r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|okciti|okkotak|paytm|okhdfcbank|phonepe|gpay|googlepay|ybl|axl|icici|ibl|sbi|hdfc|fakebank|fakeupi|upi)\b',
+        # (?!\.) negative lookahead prevents matching @fakebank inside @fakebank.com
+        r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|okciti|okkotak|paytm|okhdfcbank|phonepe|gpay|googlepay|ybl|axl|icici|ibl|sbi|hdfc|fakebank|fakeupi|upi)\b(?!\.)',
 
         # Patterns 2-4: payment context — NOT email context
         r'(?:send)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
