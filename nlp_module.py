@@ -102,27 +102,42 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
 
     # ── UPI IDs ──────────────────────────────────────────────────────────────
     #
-    # KEY RULE:
-    #   UPI IDs  → domain has NO dot    e.g. user@fakebank, name@paytm
-    #   Emails   → domain HAS a dot     e.g. user@fakebank.com, name@sbi.co.in
+    # KEY RULES:
+    #   1. Known UPI handles (@paytm, @ybl, etc.) → always UPI
+    #   2. Addresses in "email" context  → always EMAIL (even dotless domains)
+    #   3. Addresses in payment context (send/transfer/pay/UPI ID) with dotless
+    #      domain → UPI; with dotted domain → email
     #
-    # ROOT-CAUSE FIX:
-    #   Old contextual patterns like `([a-zA-Z0-9\._-]+@[a-zA-Z0-9]+)` stopped
-    #   capturing at the first dot in the domain, so "user@fakebank.com" was
-    #   captured as "user@fakebank" — passing the "no dot" check and landing
-    #   wrongly in upiIds.
-    #
-    #   Fix: domain part of contextual patterns now uses `[a-zA-Z0-9\._-]+`
-    #   so the FULL address including dots is captured first. The dot-check
-    #   then correctly sends dotted domains to emailAddresses.
+    # ROOT-CAUSE FIX (v2):
+    #   "email us at scammer.fraud@fakebank" was wrongly classified as UPI
+    #   because the domain "fakebank" has no dot.  The word "email" provides
+    #   clear context that this is an email address, not a UPI ID.
+    #   Fix: email-context patterns are matched FIRST and their captures are
+    #   routed directly to a separate email_context_addresses set, which is
+    #   excluded from UPI and merged into emailAddresses later.
 
+    # Step 1: Capture addresses that appear in explicit EMAIL context.
+    #         These are ALWAYS treated as emails regardless of domain structure.
+    email_context_patterns = [
+        r'(?:email|e-mail|mail)\s+(?:us\s+)?(?:at\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+        r'(?:email|e-mail|mail)\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+        r'(?:email|e-mail)\s+(?:id|address)[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+    ]
+    email_context_addresses = set()
+    for pattern in email_context_patterns:
+        for match in re.findall(pattern, all_text, re.IGNORECASE):
+            val = match[0] if isinstance(match, tuple) else match
+            val = val.strip().lower()
+            if '@' in val:
+                email_context_addresses.add(val)
+
+    # Step 2: Capture UPI IDs — exclude anything already captured as email-context
     upi_patterns = [
         # Pattern 1: known UPI provider handles — always UPI (full match, no group)
         r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|okciti|okkotak|paytm|okhdfcbank|phonepe|gpay|googlepay|ybl|axl|icici|ibl|sbi|hdfc|fakebank|fakeupi|upi)\b',
 
-        # Patterns 2-5: contextual — domain now allows dots so full address is
-        # captured; the dot-check below filters email vs UPI correctly.
-        r'(?:send|email)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+        # Patterns 2-4: payment context — NOT email context
+        r'(?:send)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
         r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
         r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
         r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
@@ -134,6 +149,9 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
             val = match[0] if isinstance(match, tuple) else match
             val = val.strip().lower()
             if '@' not in val:
+                continue
+            # Skip if already identified as email via email-context
+            if val in email_context_addresses:
                 continue
             domain = val.split('@', 1)[1]
             # UPI domains have NO dot; anything with a dot in the domain is an email
@@ -196,13 +214,16 @@ def extract_intelligence(text: str, conversation_history: List[Dict] = None) -> 
 
     # ── Email Addresses ───────────────────────────────────────────────────────
     # Require a dot in the domain (real emails) and exclude anything already
-    # captured as a UPI ID.
+    # captured as a UPI ID.  Also merge in email-context addresses (which may
+    # have dotless domains like scammer.fraud@fakebank).
     email_pattern = r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'
     raw_emails = set(re.findall(email_pattern, all_text, re.IGNORECASE))
     email_addresses = {
         e for e in raw_emails
         if '.' in e.split('@', 1)[1] and e.lower() not in upi_ids
     }
+    # Add email-context captures (even dotless domains like user@fakebank)
+    email_addresses |= {e for e in email_context_addresses if e not in upi_ids}
 
     # ── Case / Reference IDs ──────────────────────────────────────────────────
     case_id_patterns = [

@@ -36,22 +36,33 @@ INVESTIGATIVE_QUESTIONS = [
     "Can you give me your direct phone number so I can call back and confirm?",
     "What is the helpline number I should call to verify this?",
     "Can you share a callback number with your country code?",
+    "Is there a toll-free number I can reach your department on?",
+    "Can you give me the landline number of your office to verify?",
     # Target: UPI IDs
     "If I need to make any payment, what UPI ID should I use?",
     "Can you share the official UPI ID so I can verify it in my payment app?",
+    "What is the exact UPI handle I should send the payment to?",
     # Target: links/URLs
     "Is there a website or link where I can check my case status?",
     "Can you send me the official portal link to verify this?",
+    "Do you have any online form or link where I can submit my details securely?",
+    "Can you share the URL of your bank's customer support page?",
     # Target: email
     "Can you give me your official company email so I can verify before doing anything?",
     "Can you email me the details so I have it in writing?",
+    "What email address should I write to if I want to file a complaint?",
+    "Can you send a confirmation email to my registered email ID?",
     # Target: bank account
     "If I need to transfer, what bank account number and IFSC should I use?",
+    "Can you tell me the exact account number and branch name for the transfer?",
     # Target: identity/org info
     "What is your full name and staff ID badge number please?",
     "Is there a senior manager or supervisor I can speak to right now?",
     "What is the exact branch address I should visit to confirm this in person?",
     "What is the name of your branch and the state it is in?",
+    "Can you tell me your employee ID so I can verify with the head office?",
+    "Which department exactly are you calling from?",
+    "What is your designation in the organization?",
     # Target: verification/red flags
     "Can you tell me which RBI regulation requires me to share my OTP with you?",
     "Can you give me a case number I can verify on the official website?",
@@ -59,6 +70,15 @@ INVESTIGATIVE_QUESTIONS = [
     "Can you confirm the last 4 digits of my registered mobile number first?",
     "How do I know this is not a fraudulent call? Can you prove your identity?",
     "Can you send me an official SMS from the registered number first?",
+    "My family member works in a bank, can I check with them first before proceeding?",
+    "I want to verify this with the bank's customer care, can you give me the number?",
+    "Can you tell me my account balance to prove you have access to my account?",
+    "Why is the bank contacting me on chat instead of through the official app?",
+    "I am not comfortable sharing OTP, is there any other way to verify?",
+    "Can you give me some time? I want to check with my family before proceeding.",
+    "What happens if I do not share the OTP right now? Will my account really be blocked?",
+    "I have heard about scams like this, can you give me something official to verify?",
+    "Can you share a reference letter or official document to prove this is real?",
 ]
 
 
@@ -69,6 +89,35 @@ class AgenticHoneypot:
         self.sessions: Dict[str, Any] = {}
         self.min_messages_before_end = 8
         self.max_messages_per_session = 20
+
+        # Validate API key at startup
+        if not gemini_api_key or gemini_api_key == "your_gemini_key":
+            print("⚠️  WARNING: Gemini API key is missing or default! All responses will use fallback pool questions.")
+            print("   Set GEMINI_API_KEY in your .env file to get dynamic AI-generated responses.")
+        else:
+            masked = gemini_api_key[:8] + "..." + gemini_api_key[-4:] if len(gemini_api_key) > 12 else "***"
+            print(f"✅ Gemini API key loaded: {masked}")
+            # Quick validation ping
+            try:
+                test_resp = requests.post(
+                    f"{self.base_url}?key={self.gemini_api_key}",
+                    headers={"Content-Type": "application/json"},
+                    json={"contents": [{"parts": [{"text": "Say OK"}]}],
+                          "generationConfig": {"maxOutputTokens": 10}},
+                    timeout=10
+                )
+                if test_resp.status_code == 200:
+                    print("✅ Gemini API connection verified")
+                else:
+                    error_detail = ""
+                    try:
+                        error_detail = test_resp.json().get("error", {}).get("message", "")
+                    except Exception:
+                        error_detail = test_resp.text[:200]
+                    print(f"⚠️  Gemini API test failed: {test_resp.status_code} — {error_detail}")
+                    print("   Responses will fall back to pool questions until API is working.")
+            except Exception as e:
+                print(f"⚠️  Gemini API connection test failed: {e}")
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -108,7 +157,9 @@ class AgenticHoneypot:
         return False
 
     def _get_non_repeating_question(self, session: Dict) -> str:
-        """Pick a question from the pool that hasn't been used recently"""
+        """Pick a question from the pool that hasn't been used recently.
+        If the pool is exhausted, generate a dynamic question based on
+        what intelligence is still missing."""
         recent = self._get_recent_agent_replies(session, n=10)
         used = set()
         for q in INVESTIGATIVE_QUESTIONS:
@@ -117,8 +168,72 @@ class AgenticHoneypot:
                     used.add(q)
         available = [q for q in INVESTIGATIVE_QUESTIONS if q not in used]
         if available:
+            # Prioritize questions that target missing intelligence
+            artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+            priority = []
+            if not artifacts.get("phone_numbers"):
+                priority.extend([q for q in available if any(w in q.lower() for w in ["phone", "number", "call", "helpline", "toll"])])
+            if not artifacts.get("upi_ids"):
+                priority.extend([q for q in available if any(w in q.lower() for w in ["upi", "payment"])])
+            if not artifacts.get("urls"):
+                priority.extend([q for q in available if any(w in q.lower() for w in ["website", "link", "portal", "url"])])
+            if not artifacts.get("emails"):
+                priority.extend([q for q in available if any(w in q.lower() for w in ["email", "mail"])])
+            if not artifacts.get("bank_accounts"):
+                priority.extend([q for q in available if any(w in q.lower() for w in ["bank account", "ifsc", "transfer"])])
+            if priority:
+                return random.choice(list(set(priority)))
             return random.choice(available)
-        return random.choice(INVESTIGATIVE_QUESTIONS)
+
+        # All pool questions exhausted — generate a dynamic question
+        return self._generate_dynamic_question(session)
+
+    def _generate_dynamic_question(self, session: Dict) -> str:
+        """Generate a contextual question when the pool is exhausted."""
+        artifacts = session.get("extracted_intelligence", {}).get("artifacts", {})
+        gaps = []
+        if not artifacts.get("phone_numbers"):
+            gaps.append("phone number")
+        if not artifacts.get("upi_ids"):
+            gaps.append("UPI ID")
+        if not artifacts.get("urls"):
+            gaps.append("website link")
+        if not artifacts.get("bank_accounts"):
+            gaps.append("bank account details")
+        if not artifacts.get("emails"):
+            gaps.append("email address")
+        if not artifacts.get("case_ids"):
+            gaps.append("case reference number")
+
+        # Dynamic questions based on missing intel
+        dynamic_templates = [
+            "Sir, I am very worried about my account. Can you please give me your {gap} so I can verify everything?",
+            "Before I do anything, I need your {gap} for my records. My family is asking me to be careful.",
+            "OK sir, I will cooperate but first please share your {gap} so I can confirm with my bank branch.",
+            "My son is telling me to be careful. Can you share your {gap} so he can also verify?",
+            "I want to help but I am scared. Please give me your {gap} so I feel safe about this.",
+            "One more thing sir, can you also provide your {gap}? I want to keep a record of everything.",
+            "I am noting down everything. What is your {gap}? I need it for my personal records.",
+            "My neighbor who works in bank said I should ask for your {gap} before sharing anything.",
+        ]
+
+        if gaps:
+            gap = random.choice(gaps)
+            template = random.choice(dynamic_templates)
+            return template.format(gap=gap)
+
+        # If we somehow have all intel, use generic stalling
+        stalling = [
+            "Sir, please give me 5 minutes, I am getting another call from the bank.",
+            "My internet is very slow, can you please wait while I try to check?",
+            "I am at the ATM right now, can you tell me what to do step by step?",
+            "Sir, my phone is about to die. Can you message me all the details quickly?",
+            "Hold on sir, my daughter is calling me. I will get back to you in 2 minutes.",
+            "I am confused about the process. Can you explain from the beginning once more?",
+            "Sir, I tried but the OTP is not coming. What should I do now?",
+            "The app is showing error. Can you give me another way to do the verification?",
+        ]
+        return random.choice(stalling)
 
     def _should_end_conversation(self, session: Dict) -> bool:
         """Only end after 8+ scammer messages to maximise turn count score"""
@@ -235,6 +350,16 @@ Analyze and return ONLY valid JSON:
                         return self._fallback_analysis(message, session)
 
             print(f"⚠️ Gemini analysis returned {response.status_code}")
+            try:
+                error_body = response.json()
+                error_msg = error_body.get("error", {}).get("message", response.text[:200])
+                print(f"   Error detail: {error_msg}")
+            except Exception:
+                print(f"   Raw response: {response.text[:300]}")
+        except requests.exceptions.Timeout:
+            print(f"❌ Gemini analysis timed out (15s)")
+        except requests.exceptions.ConnectionError as e:
+            print(f"❌ Gemini analysis connection error: {e}")
         except Exception as e:
             print(f"❌ Gemini analysis error: {e}")
 
@@ -398,6 +523,9 @@ Your response (complete, different from recent replies, 20-40 words):"""
 
                     text = candidate["content"]["parts"][0]["text"].strip()
                     text = text.replace('"', '').replace("'", "").strip()
+                    # Clean up common Gemini artifacts
+                    text = re.sub(r'^\*+|\*+$', '', text).strip()
+                    text = re.sub(r'^\(.*?\)\s*', '', text).strip()
 
                     if len(text) < 10:
                         print(f"⚠️ Gemini reply too short: '{text}', using pool question")
@@ -409,8 +537,26 @@ Your response (complete, different from recent replies, 20-40 words):"""
 
                     print(f"🤖 Response: {text}")
                     return text
+                else:
+                    # No candidates — might be safety block
+                    block_reason = result.get("promptFeedback", {}).get("blockReason", "unknown")
+                    print(f"⚠️ Gemini returned no candidates. Block reason: {block_reason}")
+                    print(f"   Full response: {json.dumps(result)[:500]}")
 
-            print(f"⚠️ Gemini response failed: {response.status_code}")
+            else:
+                # Non-200 status — log details for debugging
+                print(f"⚠️ Gemini response failed: {response.status_code}")
+                try:
+                    error_body = response.json()
+                    error_msg = error_body.get("error", {}).get("message", response.text[:200])
+                    print(f"   Error detail: {error_msg}")
+                except Exception:
+                    print(f"   Raw response: {response.text[:300]}")
+
+        except requests.exceptions.Timeout:
+            print(f"❌ Gemini response timed out (15s)")
+        except requests.exceptions.ConnectionError as e:
+            print(f"❌ Gemini connection error: {e}")
         except Exception as e:
             print(f"❌ Response generation error: {e}")
 
@@ -423,11 +569,27 @@ Your response (complete, different from recent replies, 20-40 words):"""
         Separated out so it can be called on individual messages OR full history."""
 
         # UPI IDs — domain has NO dot (emails have dots in domain)
-        # FIX: contextual patterns now capture full address including dots,
-        # so the dot-check correctly routes emails to emailAddresses instead.
+        # FIX v2: addresses in explicit "email" context are routed to emails,
+        # even if the domain has no dot (e.g. scammer.fraud@fakebank).
+        # Email-context patterns are matched FIRST.
+
+        # Step 1: Capture addresses in email context → always EMAIL
+        email_context_patterns = [
+            r'(?:email|e-mail|mail)\s+(?:us\s+)?(?:at\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+            r'(?:email|e-mail|mail)\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+            r'(?:email|e-mail)\s+(?:id|address)[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+        ]
+        email_context_addresses = set()
+        for pattern in email_context_patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                val = match.group(1).strip().lower()
+                if '@' in val:
+                    email_context_addresses.add(val)
+
+        # Step 2: Capture UPI IDs — skip anything in email-context
         upi_patterns = [
             r'\b[\w\.\-]+@(?:okicici|oksbi|okhdfc|okaxis|okbob|paytm|phonepe|gpay|ybl|axl|fakebank|fakeupi|upi)\b',
-            r'(?:send|email)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
+            r'(?:send)\s+(?:the\s+)?(?:otp\s+)?(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
             r'transfer\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
             r'UPI\s*ID[:\s]+([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
             r'pay\s+(?:to\s+)?([a-zA-Z0-9\._-]+@[a-zA-Z0-9\._-]+)',
@@ -439,6 +601,9 @@ Your response (complete, different from recent replies, 20-40 words):"""
                 upi = match.group(1) if match.lastindex else match.group(0)
                 upi = upi.strip().lower()
                 domain = upi.split('@')[1] if '@' in upi else ''
+                # Skip if captured as email-context address
+                if upi in email_context_addresses:
+                    continue
                 if '@' in upi and '.' not in domain:
                     if upi not in artifacts["upi_ids"]:
                         artifacts["upi_ids"].append(upi)
@@ -512,6 +677,11 @@ Your response (complete, different from recent replies, 20-40 words):"""
             if '.' in email.split('@')[1] and email not in artifacts["emails"] and email not in artifacts.get("upi_ids", []):
                 artifacts["emails"].append(email)
                 print(f"🎯 Email: {email}")
+        # Also add email-context captures (even dotless domains like user@fakebank)
+        for email in email_context_addresses:
+            if email not in artifacts["emails"] and email not in artifacts.get("upi_ids", []):
+                artifacts["emails"].append(email)
+                print(f"🎯 Email (context): {email}")
 
         # Case / Reference / Staff IDs
         # FIX: exclude pure digit strings (those are bank accounts or phone numbers)
